@@ -11,6 +11,8 @@
 
 CC=gcc
 
+all: writer
+
 writer: writer.o
 	@echo 'Building writer!'
 	@$(CROSS_COMPILE)$(CC) -o writer writer.o
