@@ -25,11 +25,8 @@ int main_loop(int socket_fd, struct sockaddr client_address, socklen_t client_ad
     bool found_end;
     int accept_fd = 0;
     char ip_string[INET_ADDRSTRLEN];
-
-    
-
-
     current_state = WaitingForClient;
+
     while (keep_looping)
     {
         if (current_state == WaitingForClient)
@@ -38,13 +35,16 @@ int main_loop(int socket_fd, struct sockaddr client_address, socklen_t client_ad
         }
         else if (current_state == RecievingData)
         {
-            recieving_data(accept_fd, recv_buffer, total_buffer_size, total_allocated_size, client_address, ip_string);
+            total_buffer_size += recieving_data(accept_fd, &recv_buffer, &total_buffer_size, &total_allocated_size, ip_string);
         }
         else if (current_state == SendingData)
         {
-            sending_data(accept_fd, send_buffer, total_file_size, total_sent_bytes);
+            total_sent_bytes += sending_data(accept_fd, send_buffer, get_file_size(FILE_PATH), total_sent_bytes);
         }
     }
+
+    current_state = ShuttingDown;
+    shutting_down(socket_fd, recv_buffer, res);
 }
 
 int startup()
@@ -121,10 +121,10 @@ int waiting_for_client(int socket_fd, struct sockaddr client_address, socklen_t 
     return accept_fd;
 }
 
-int recieving_data(int accept_fd, char *recv_buffer, size_t total_buffer_size, size_t total_allocated_size, struct sockaddr client_address, char* ip_string)
+int recieving_data(int accept_fd, char **recv_buffer, size_t *total_buffer_size, size_t *total_allocated_size, char* ip_string)
 {
     char temp[RECV_BUFFER_SIZE];
-    int recv_bytes = recv(accept_fd, temp, sizeof(temp), 0);
+    ssize_t recv_bytes = recv(accept_fd, temp, sizeof(temp), 0);
 
     if (recv_bytes == -1)
     {
@@ -133,8 +133,7 @@ int recieving_data(int accept_fd, char *recv_buffer, size_t total_buffer_size, s
         return 1;
     }
 
-    // Client closed connection    char ip_string[INET_ADDRSTRLEN];
-    
+    // Client closed connection
     if (recv_bytes == 0)
     {
         print_and_log(LOG_INFO, "Closed connection from %s\n", ip_string);
@@ -143,38 +142,63 @@ int recieving_data(int accept_fd, char *recv_buffer, size_t total_buffer_size, s
         return 0;
     }
 
-    print_and_log(LOG_DEBUG, "%s\n", temp);
-
-
     // Grow buffer if needed
-    if (total_allocated_size < total_buffer_size + recv_bytes + 1)
+    while (*total_allocated_size < *total_buffer_size + recv_bytes + 1)
     {
-        total_allocated_size += RECV_BUFFER_SIZE;
-        char* recv_buffer_temp = realloc(recv_buffer, total_allocated_size);
+        *total_allocated_size += RECV_BUFFER_SIZE;
+        char* recv_buffer_temp = realloc(*recv_buffer, *total_allocated_size);
         if (!recv_buffer_temp)
         {
             keep_looping = false;
             return -1;
         }
 
-        recv_buffer = recv_buffer_temp;
+        *recv_buffer = recv_buffer_temp;
     }
 
     // Copy data to buffer
-    memcpy(recv_buffer + total_buffer_size, temp, recv_bytes);
-    total_buffer_size += recv_bytes;
+    memcpy(*recv_buffer + *total_buffer_size, temp, recv_bytes);
 
-    // End of packet received, write to file and reset buffer
-    if (recv_buffer[total_buffer_size - 1] == '\n')
+    // If newline recieved, write to file, and shift everything forward in the buffer
+    int count = 0;
+    bool found_packet_end = false;
+    size_t new_packet_start = 0;
+    size_t remaining = 0;
+    while (count < recv_bytes)
     {
-        // Writing to file and resetting buffer
-        write_to_file(FILE_PATH, recv_buffer, total_buffer_size);
-        total_buffer_size = 0;
+        if ((*recv_buffer)[*total_buffer_size + count] == PACKET_ENDING)
+        {
+            found_packet_end = true;
+            write_to_file(FILE_PATH, *recv_buffer, *total_buffer_size + count + 1);
+
+            new_packet_start = *total_buffer_size + count + 1;
+            remaining  = (size_t)recv_bytes - (count + 1);
+            memmove(*recv_buffer, *recv_buffer + new_packet_start, remaining);
+            break;
+        }
+        count++;
     }
+
+    if (found_packet_end)
+    {
+        *total_buffer_size = remaining;
+    }
+    else
+    {
+        *total_buffer_size += recv_bytes;
+    }
+
+    return 0;
 }
 
 int sending_data(int accept_fd, char *send_buffer, size_t total_file_size, size_t total_sent_bytes)
 {
+    if (total_file_size == -1)
+    {
+        keep_looping = false;
+        return 1;
+    }
+
     // Read file contents to send buffer
     send_buffer = malloc(total_file_size + 1);
     if (!send_buffer)
@@ -300,6 +324,22 @@ int read_from_file(const char *filename, char *buffer, size_t buffer_size)
 
     // Close the file descriptor
     close(fd);
+}
+
+int get_file_size(const char *filename)
+{
+    // Open the file for reading
+    int fd = open(filename, O_RDONLY);
+    if (fd == -1)
+    {
+        print_and_log(LOG_ERR, "Error: Failed to open file '%s' for reading!\n", filename);
+        return -1;
+    }
+
+    fseek(fd, 0, SEEK_END);
+    long fsize = ftell(fd);
+
+    return fsize;
 }
 
 void get_client_ip_address(struct sockaddr client_address, char* ip_string, size_t ip_string_size)
