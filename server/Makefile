@@ -9,7 +9,7 @@ aesdsocket: aesdsocket.o
 	@echo 'Building aesdsocket!'
 	@$(CROSS_COMPILE)$(CC) -o aesdsocket aesdsocket.o
 
-aesdsocket.o : aesdsocket.c
+aesdsocket.o : aesdsocket.c aesdsocket.h
 	@$(CROSS_COMPILE)$(CC) -c aesdsocket.c
 
 clean : 

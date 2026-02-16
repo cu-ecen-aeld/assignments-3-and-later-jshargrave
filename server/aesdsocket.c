@@ -5,65 +5,54 @@
 
 #include "aesdsocket.h"
 
+
+
 int main()
 {
-    startup();
-}
-
-int main_loop(int socket_fd, struct sockaddr client_address, socklen_t client_address_len, struct addrinfo *res)
-{
-    // Main loop
-    char *send_buffer = NULL;
-    char *recv_buffer = NULL;
-    char *recv_buffer_temp = NULL;
-    size_t total_sent_bytes = 0;
-    size_t total_file_size = 0; 
-    size_t total_allocated_size = 0; 
-    size_t total_buffer_size = 0; 
-    ssize_t recv_bytes = 0;
-    char temp[RECV_BUFFER_SIZE];
-    bool found_end;
-    int accept_fd = 0;
-    char ip_string[INET_ADDRSTRLEN];
-    current_state = WaitingForClient;
-
-    while (keep_looping)
-    {
-        if (current_state == WaitingForClient)
-        {
-            accept_fd = waiting_for_client(socket_fd, client_address, client_address_len, ip_string, sizeof(ip_string));
-        }
-        else if (current_state == RecievingData)
-        {
-            total_buffer_size += recieving_data(accept_fd, &recv_buffer, &total_buffer_size, &total_allocated_size, ip_string);
-        }
-        else if (current_state == SendingData)
-        {
-            total_sent_bytes += sending_data(accept_fd, send_buffer, get_file_size(FILE_PATH), total_sent_bytes);
-        }
-    }
-
-    current_state = ShuttingDown;
-    shutting_down(socket_fd, recv_buffer, res);
-}
-
-int startup()
-{
-    current_state = Startup;
-
     // Setup logger
     openlog(NULL, LOG_ODELAY, LOG_USER);
     print_and_log(LOG_INFO, "%s\n", "AESD Socket Starting!");
 
     // Variable Setup
-    bool found_end_packet = false;
-    bool client_connected = false;
-    struct sockaddr client_address;
-    socklen_t client_address_len = sizeof(client_address);
-    struct addrinfo * res = NULL;
-    struct addrinfo hints;
     memset(&hints, 0, sizeof(hints));
-    hints.ai_flags = AI_PASSIVE;
+    hints.ai_family   = AF_INET;      // IPv4
+    hints.ai_socktype = SOCK_STREAM;  // TCP
+    hints.ai_flags    = AI_PASSIVE;   // bind()
+
+    if (startup() != -1)
+    {
+        main_loop();
+    }
+    shutting_down();
+
+    return 0;
+}
+
+int main_loop()
+{
+    // Main loop
+    current_state = WaitingForClient;
+    while (keep_looping)
+    {
+        if (current_state == WaitingForClient)
+        {
+            waiting_for_client();
+        }
+        else if (current_state == RecievingData)
+        {
+            recieving_data();
+        }
+        else if (current_state == SendingData)
+        {
+            sending_data();
+        }
+    }
+    return 0;
+}
+
+int startup()
+{
+    current_state = Startup;
 
     // Get address info
     int getaddrinfo_return_value = getaddrinfo(NULL, SOCKET_PORT, &hints, &res);
@@ -71,16 +60,16 @@ int startup()
     {
         // Error!!!
         print_and_log(LOG_ERR, "%s\n", "Error: Failed to get address info!");
-        return 1;
+        return -1;
     }
 
     // Socket file descriptor
-    int socket_fd = socket(PF_INET, SOCK_STREAM, 0);
+    socket_fd = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
     if (socket_fd == -1)
     {
         // Error!!!
         print_and_log(LOG_ERR, "%s\n", "Error: Failed to get socket file descriptor!");
-        return 1;
+        return -1;
     }
 
     // Socket bind
@@ -89,7 +78,7 @@ int startup()
     {
         // Error!!!
         print_and_log(LOG_ERR, "%s\n", "Error: Failed to bind socket!");
-        return 1;
+        return -1;
     }
 
     // Socket listen
@@ -98,66 +87,66 @@ int startup()
     {
         // Error!!!
         print_and_log(LOG_ERR, "%s\n", "Error: Failed to listen on socket!");
-        return 1;
+        return -1;
     }
 
-    main_loop(socket_fd, client_address, client_address_len, res);
+    return 0;
 }
 
-int waiting_for_client(int socket_fd, struct sockaddr client_address, socklen_t client_address_len, char* ip_string, size_t ip_string_size)
+int waiting_for_client()
 {
-    int accept_fd = accept(socket_fd, &client_address, &client_address_len);
-    if (accept_fd == -1)
+    client_address_len = sizeof(client_address);
+    client_fd = accept(socket_fd, (struct sockaddr *)&client_address, &client_address_len);
+    if (client_fd == -1)
     {
         print_and_log(LOG_ERR, "%s\n", "Error: Failed to accept client connection!");
-        return 1;
+        return -1;
     }
 
     // Print client IP address
-    get_client_ip_address(client_address, ip_string, ip_string_size);
+    get_client_ip_address(client_address, ip_string, sizeof(ip_string));
     print_and_log(LOG_INFO, "Accepted connection from %s\n", ip_string);
 
     current_state = RecievingData;
-    return accept_fd;
+    return 0;
 }
 
-int recieving_data(int accept_fd, char **recv_buffer, size_t *total_buffer_size, size_t *total_allocated_size, char* ip_string)
+int recieving_data()
 {
     char temp[RECV_BUFFER_SIZE];
-    ssize_t recv_bytes = recv(accept_fd, temp, sizeof(temp), 0);
+    ssize_t recv_bytes = recv(client_fd, temp, sizeof(temp), 0);
 
     if (recv_bytes == -1)
     {
         print_and_log(LOG_ERR, "%s\n", "Error: Failed to receive data from client!");
-        keep_looping = false;
-        return 1;
+        return -1;
     }
 
     // Client closed connection
     if (recv_bytes == 0)
     {
         print_and_log(LOG_INFO, "Closed connection from %s\n", ip_string);
-        close(accept_fd);
+        close(client_fd);
         current_state = WaitingForClient;
         return 0;
     }
 
     // Grow buffer if needed
-    while (*total_allocated_size < *total_buffer_size + recv_bytes + 1)
+    while (recv_allocated_size < recv_buffer_size + recv_bytes + 1)
     {
-        *total_allocated_size += RECV_BUFFER_SIZE;
-        char* recv_buffer_temp = realloc(*recv_buffer, *total_allocated_size);
+        recv_allocated_size += RECV_BUFFER_SIZE;
+        char* recv_buffer_temp = realloc(recv_buffer, recv_allocated_size);
         if (!recv_buffer_temp)
         {
             keep_looping = false;
             return -1;
         }
 
-        *recv_buffer = recv_buffer_temp;
+        recv_buffer = recv_buffer_temp;
     }
 
     // Copy data to buffer
-    memcpy(*recv_buffer + *total_buffer_size, temp, recv_bytes);
+    memcpy(recv_buffer + recv_buffer_size, temp, recv_bytes);
 
     // If newline recieved, write to file, and shift everything forward in the buffer
     int count = 0;
@@ -166,14 +155,14 @@ int recieving_data(int accept_fd, char **recv_buffer, size_t *total_buffer_size,
     size_t remaining = 0;
     while (count < recv_bytes)
     {
-        if ((*recv_buffer)[*total_buffer_size + count] == PACKET_ENDING)
+        if (recv_buffer[recv_buffer_size + count] == PACKET_ENDING)
         {
             found_packet_end = true;
-            write_to_file(FILE_PATH, *recv_buffer, *total_buffer_size + count + 1);
+            write_to_file(FILE_PATH, recv_buffer, recv_buffer_size + count + 1);
 
-            new_packet_start = *total_buffer_size + count + 1;
+            new_packet_start = recv_buffer_size + count + 1;
             remaining  = (size_t)recv_bytes - (count + 1);
-            memmove(*recv_buffer, *recv_buffer + new_packet_start, remaining);
+            memmove(recv_buffer, recv_buffer + new_packet_start, remaining);
             break;
         }
         count++;
@@ -181,61 +170,89 @@ int recieving_data(int accept_fd, char **recv_buffer, size_t *total_buffer_size,
 
     if (found_packet_end)
     {
-        *total_buffer_size = remaining;
+        recv_buffer_size = remaining;
+        current_state = SendingData;
     }
     else
     {
-        *total_buffer_size += recv_bytes;
+        recv_buffer_size += recv_bytes;
     }
 
+    recv_buffer[recv_buffer_size] = '\0'; // Null terminate for printouts
     return 0;
 }
 
-int sending_data(int accept_fd, char *send_buffer, size_t total_file_size, size_t total_sent_bytes)
+int sending_data()
 {
-    if (total_file_size == -1)
+    send_bytes_sent = 0;
+    send_buffer_size = get_file_size(FILE_PATH);
+    if (send_buffer_size == -1)
     {
-        keep_looping = false;
-        return 1;
+        print_and_log(LOG_ERR, "%s\n", "Error: Failed to get file size!");
+        return -1;
     }
 
     // Read file contents to send buffer
-    send_buffer = malloc(total_file_size + 1);
+    send_buffer = malloc(send_buffer_size + 1);
     if (!send_buffer)
     {
         keep_looping = false;
-        return 1;
+        return -1;
     }
-    read_from_file(FILE_PATH, send_buffer, total_file_size + 1);
+    int total_bytes_to_send = read_from_file(FILE_PATH, send_buffer, send_buffer_size + 1);
 
-    // Send file contents to client
-    while(total_sent_bytes < total_file_size)
+    while (send_bytes_sent < total_bytes_to_send)
     {
-        ssize_t send_bytes = send(accept_fd, send_buffer + total_sent_bytes, total_file_size - total_sent_bytes, 0);
+        ssize_t send_bytes = send(client_fd, send_buffer + send_bytes_sent, total_bytes_to_send - send_bytes_sent, 0);
         if (send_bytes == -1)
         {
             print_and_log(LOG_ERR, "%s\n", "Error: Failed to send data to client!");
-            keep_looping = false;
-            continue;   
+            free(send_buffer);
+            return -1;
         }
-        total_sent_bytes += send_bytes;
+        send_bytes_sent += send_bytes;
     }
 
     // Free send buffer
     free(send_buffer);
+    send_buffer = NULL;
+
+    current_state = RecievingData;
+
+    return 0;
 }
 
-int shutting_down(int socket_fd, char *recv_buffer, struct addrinfo *res)
+int shutting_down()
 {
     current_state = ShuttingDown;
 
     print_and_log(LOG_INFO, "%s\n", "AESD Socket Stopping!");
 
     // Free receive buffer
-    free(recv_buffer);
+    if (recv_buffer)
+    {
+        free(recv_buffer);
+    }
 
-    // Free address info
-    freeaddrinfo(res);
+    if (send_buffer)
+    {
+        free(send_buffer);
+    }
+
+    if (socket_fd != -1)
+    {
+        close(socket_fd);
+    }
+
+    if (client_fd != -1)
+    {
+        close(client_fd);
+    }
+
+    if (res)
+    {
+        freeaddrinfo(res);
+    }
 
 
     closelog();
@@ -278,7 +295,7 @@ int write_to_file(const char *filename, const char *data, ssize_t data_length)
     if (fd == -1)
     {
         print_and_log(LOG_ERR, "Error: Failed to open file '%s' for writing!\n", filename);
-        return 1;
+        return -1;
     }
 
     // Write the data to the file
@@ -286,16 +303,17 @@ int write_to_file(const char *filename, const char *data, ssize_t data_length)
     if (bytes_written == -1)
     {
         print_and_log(LOG_ERR, "Error: Failed to write to file '%s'!\n", filename);
-        return 1;
+        close(fd);
+        return -1;
     }
     else
     {
         print_and_log(LOG_INFO, "Successfully wrote %zd bytes to file '%s'\n", bytes_written, filename);
-        return 1;
     }
 
     // Close the file descriptor
     close(fd);
+    return bytes_written;
 }
 
 int read_from_file(const char *filename, char *buffer, size_t buffer_size)
@@ -305,7 +323,7 @@ int read_from_file(const char *filename, char *buffer, size_t buffer_size)
     if (fd == -1)
     {
         print_and_log(LOG_ERR, "Error: Failed to open file '%s' for reading!\n", filename);
-        return 1;
+        return -1;
     }
 
     // Read the data from the file
@@ -313,36 +331,33 @@ int read_from_file(const char *filename, char *buffer, size_t buffer_size)
     if (bytes_read == -1)
     {
         print_and_log(LOG_ERR, "Error: Failed to read from file '%s'!\n", filename);
-        return 1;
+        close(fd);
+        return -1;
     }
     else
     {
         buffer[bytes_read] = '\0'; // Null-terminate the buffer
         print_and_log(LOG_INFO, "Successfully read %zd bytes from file '%s'\n", bytes_read, filename);
-        return 1;
     }
 
     // Close the file descriptor
     close(fd);
+    return bytes_read;
 }
 
 int get_file_size(const char *filename)
 {
-    // Open the file for reading
-    int fd = open(filename, O_RDONLY);
-    if (fd == -1)
+    struct stat st;
+    if (stat(FILE_PATH, &st) != 0)
     {
-        print_and_log(LOG_ERR, "Error: Failed to open file '%s' for reading!\n", filename);
+        print_and_log(LOG_ERR, "Error: stat failed for '%s'\n", filename);
         return -1;
     }
 
-    fseek(fd, 0, SEEK_END);
-    long fsize = ftell(fd);
-
-    return fsize;
+    return (int)st.st_size;
 }
 
-void get_client_ip_address(struct sockaddr client_address, char* ip_string, size_t ip_string_size)
+void get_client_ip_address(struct sockaddr_storage client_address, char* ip_string, size_t ip_string_size)
 {
     struct sockaddr_in *addr_in_ptr = (struct sockaddr_in *)&client_address;
     inet_ntop(AF_INET, &addr_in_ptr->sin_addr, ip_string, ip_string_size);
