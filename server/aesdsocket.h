@@ -17,11 +17,12 @@
 #include <arpa/inet.h>
 #include <fcntl.h>
 #include <stdlib.h>
+#include <signal.h>
+#include <errno.h>
 
 #define SOCKET_PORT "9000"
 #define RECV_BUFFER_SIZE 1024
 #define SEND_BUFFER_SIZE 1024
-#define PACKET_BUFFER_SIZE 1024
 #define FILE_PATH "/var/tmp/aesdsocketdata"
 #define PACKET_ENDING '\n'
 
@@ -47,8 +48,9 @@ struct addrinfo hints;
 
 char *recv_buffer = NULL;
 size_t recv_allocated_size = 0; 
-size_t recv_buffer_size = 0; 
+size_t recv_buffer_size = 0;
 
+static volatile sig_atomic_t caught_signal = 0;
 
 int main();
 int main_loop();
@@ -63,6 +65,4 @@ int write_to_file(const char *filename, const char *data, ssize_t data_length);
 int read_from_file(const char *filename, char *buffer, size_t buffer_size);
 int get_file_size(const char *filename);
 void get_client_ip_address(struct sockaddr_storage client_address, char* ip_string, size_t ip_string_size);
-
-
-
+static void signal_handler(int signal_number);

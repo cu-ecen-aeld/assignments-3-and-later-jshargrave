@@ -9,16 +9,6 @@
 
 int main()
 {
-    // Setup logger
-    openlog(NULL, LOG_ODELAY, LOG_USER);
-    print_and_log(LOG_INFO, "%s\n", "AESD Socket Starting!");
-
-    // Variable Setup
-    memset(&hints, 0, sizeof(hints));
-    hints.ai_family   = AF_INET;      // IPv4
-    hints.ai_socktype = SOCK_STREAM;  // TCP
-    hints.ai_flags    = AI_PASSIVE;   // bind()
-
     if (startup() != -1)
     {
         main_loop();
@@ -34,7 +24,13 @@ int main_loop()
     current_state = WaitingForClient;
     while (keep_looping)
     {
-        if (current_state == WaitingForClient)
+        if (caught_signal && current_state == WaitingForClient)
+        {
+           print_and_log(LOG_INFO, "%s\n", "Caught signal, exiting");
+           keep_looping = false;
+           continue;
+        }
+        else if (current_state == WaitingForClient)
         {
             waiting_for_client();
         }
@@ -54,11 +50,37 @@ int startup()
 {
     current_state = Startup;
 
+    // Setup logger
+    openlog(NULL, LOG_ODELAY, LOG_USER);
+    print_and_log(LOG_INFO, "%s\n", "AESD Socket Starting!");
+
+    // Variable Setup - Anything that couldn't be done in .h file
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family   = AF_INET;      // IPv4
+    hints.ai_socktype = SOCK_STREAM;  // TCP
+    hints.ai_flags    = AI_PASSIVE;   // bind()
+
+    // Signals
+    struct sigaction signal_action;
+    memset(&signal_action, 0, sizeof(signal_action));
+    signal_action.sa_handler = signal_handler;
+
+    if (sigaction(SIGTERM, &signal_action, NULL) != 0)
+    {
+        print_and_log(LOG_ERR, "%s\n", "Error: Failed to register SIGTERM signal handler!");
+        return -1;
+    }
+
+    if (sigaction(SIGINT, &signal_action, NULL) != 0)
+    {
+        print_and_log(LOG_ERR, "%s\n", "Error: Failed to register SIGINT signal handler!");
+        return -1;
+    }
+
     // Get address info
     int getaddrinfo_return_value = getaddrinfo(NULL, SOCKET_PORT, &hints, &res);
     if (getaddrinfo_return_value != 0)
     {
-        // Error!!!
         print_and_log(LOG_ERR, "%s\n", "Error: Failed to get address info!");
         return -1;
     }
@@ -67,7 +89,6 @@ int startup()
     socket_fd = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
     if (socket_fd == -1)
     {
-        // Error!!!
         print_and_log(LOG_ERR, "%s\n", "Error: Failed to get socket file descriptor!");
         return -1;
     }
@@ -76,7 +97,6 @@ int startup()
     int bind_return_value = bind(socket_fd, res->ai_addr, res->ai_addrlen);
     if (bind_return_value == -1)
     {
-        // Error!!!
         print_and_log(LOG_ERR, "%s\n", "Error: Failed to bind socket!");
         return -1;
     }
@@ -85,7 +105,6 @@ int startup()
     int listen_return_value = listen(socket_fd, 10);
     if (listen_return_value == -1)
     {
-        // Error!!!
         print_and_log(LOG_ERR, "%s\n", "Error: Failed to listen on socket!");
         return -1;
     }
@@ -99,6 +118,11 @@ int waiting_for_client()
     client_fd = accept(socket_fd, (struct sockaddr *)&client_address, &client_address_len);
     if (client_fd == -1)
     {
+        // If signal triggerd this fail don't print this error
+        if (errno == EINTR && caught_signal)
+        {
+            return 0;
+        }
         print_and_log(LOG_ERR, "%s\n", "Error: Failed to accept client connection!");
         return -1;
     }
@@ -250,11 +274,20 @@ int shutting_down()
     if (socket_fd != -1)
     {
         close(socket_fd);
+        socket_fd = -1
     }
 
     if (client_fd != -1)
     {
         close(client_fd);
+        client_fd = -1;
+    }
+
+    // Delete tmp file
+    int unlink_return_value = unlink(FILE_PATH);
+    if (unlink_return_value == -1)
+    {
+        print_and_log(LOG_ERR, "Error: Failed to delete temp file '%s'!\n", FILE_PATH);
     }
 
     closelog();
@@ -308,10 +341,6 @@ int write_to_file(const char *filename, const char *data, ssize_t data_length)
         close(fd);
         return -1;
     }
-    else
-    {
-        print_and_log(LOG_INFO, "Successfully wrote %zd bytes to file '%s'\n", bytes_written, filename);
-    }
 
     // Close the file descriptor
     close(fd);
@@ -363,4 +392,12 @@ void get_client_ip_address(struct sockaddr_storage client_address, char* ip_stri
 {
     struct sockaddr_in *addr_in_ptr = (struct sockaddr_in *)&client_address;
     inet_ntop(AF_INET, &addr_in_ptr->sin_addr, ip_string, ip_string_size);
+}
+
+static void signal_handler(int signal_number)
+{
+    if (signal_number == SIGINT || signal_number == SIGTERM)
+    {
+        caught_signal = true;
+    }
 }
