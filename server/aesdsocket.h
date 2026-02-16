@@ -20,6 +20,7 @@
 
 #define SOCKET_PORT "9000"
 #define RECV_BUFFER_SIZE 1024
+#define SEND_BUFFER_SIZE 1024
 #define PACKET_BUFFER_SIZE 1024
 #define FILE_PATH "/var/tmp/aesdsocketdata"
 #define PACKET_ENDING '\n'
@@ -44,12 +45,9 @@ socklen_t client_address_len = sizeof(client_address);
 char ip_string[INET_ADDRSTRLEN];
 struct addrinfo hints;
 
-char *send_buffer = NULL;
 char *recv_buffer = NULL;
 size_t recv_allocated_size = 0; 
 size_t recv_buffer_size = 0; 
-size_t send_buffer_size = 0; 
-size_t send_bytes_sent = 0; 
 
 
 int main();

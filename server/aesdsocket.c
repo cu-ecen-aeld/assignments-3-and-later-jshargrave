@@ -184,39 +184,44 @@ int recieving_data()
 
 int sending_data()
 {
-    send_bytes_sent = 0;
-    send_buffer_size = get_file_size(FILE_PATH);
-    if (send_buffer_size == -1)
+    // Open the file for reading
+    int fd = open(FILE_PATH, O_RDONLY);
+    if (fd == -1)
     {
-        print_and_log(LOG_ERR, "%s\n", "Error: Failed to get file size!");
+        print_and_log(LOG_ERR, "Error: Failed to open file '%s' for reading!\n", FILE_PATH);
         return -1;
     }
 
-    // Read file contents to send buffer
-    send_buffer = malloc(send_buffer_size + 1);
-    if (!send_buffer)
+    // Read the data from the file
+    char send_buffer[SEND_BUFFER_SIZE];
+    ssize_t bytes_read;
+    ssize_t sent_bytes;
+    ssize_t total_bytes_sent;
+    while ((bytes_read = read(fd, send_buffer, sizeof(send_buffer))) > 0)
     {
-        keep_looping = false;
-        return -1;
-    }
-    int total_bytes_to_send = read_from_file(FILE_PATH, send_buffer, send_buffer_size + 1);
+        total_bytes_sent = 0;
 
-    while (send_bytes_sent < total_bytes_to_send)
-    {
-        ssize_t send_bytes = send(client_fd, send_buffer + send_bytes_sent, total_bytes_to_send - send_bytes_sent, 0);
-        if (send_bytes == -1)
+        while (total_bytes_sent < bytes_read)
         {
-            print_and_log(LOG_ERR, "%s\n", "Error: Failed to send data to client!");
-            free(send_buffer);
-            return -1;
+            sent_bytes = send(client_fd, send_buffer + total_bytes_sent, bytes_read - total_bytes_sent, 0);
+            if (sent_bytes == -1)
+            {
+                print_and_log(LOG_ERR, "%s\n", "Error: Failed to send data to client!");
+                close(fd);
+                return -1;
+            }
+            total_bytes_sent += sent_bytes;
         }
-        send_bytes_sent += send_bytes;
     }
 
-    // Free send buffer
-    free(send_buffer);
-    send_buffer = NULL;
+    if (bytes_read == -1)
+    {
+        print_and_log(LOG_ERR, "Error: Failed to read from file '%s'!\n", FILE_PATH);
+        close(fd);
+        return -1;
+    }
 
+    close(fd);
     current_state = RecievingData;
 
     return 0;
@@ -228,17 +233,20 @@ int shutting_down()
 
     print_and_log(LOG_INFO, "%s\n", "AESD Socket Stopping!");
 
-    // Free receive buffer
+    // Free buffers
     if (recv_buffer)
     {
         free(recv_buffer);
+        recv_buffer = NULL;
     }
 
-    if (send_buffer)
+    if (res)
     {
-        free(send_buffer);
+        freeaddrinfo(res);
+        res = NULL;
     }
 
+    // Close sockets
     if (socket_fd != -1)
     {
         close(socket_fd);
@@ -248,12 +256,6 @@ int shutting_down()
     {
         close(client_fd);
     }
-
-    if (res)
-    {
-        freeaddrinfo(res);
-    }
-
 
     closelog();
 
@@ -348,7 +350,7 @@ int read_from_file(const char *filename, char *buffer, size_t buffer_size)
 int get_file_size(const char *filename)
 {
     struct stat st;
-    if (stat(FILE_PATH, &st) != 0)
+    if (stat(filename, &st) != 0)
     {
         print_and_log(LOG_ERR, "Error: stat failed for '%s'\n", filename);
         return -1;
