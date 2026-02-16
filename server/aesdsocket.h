@@ -51,9 +51,11 @@ size_t recv_allocated_size = 0;
 size_t recv_buffer_size = 0;
 
 static volatile sig_atomic_t caught_signal = 0;
+bool daemon_enabled = false;
 
 int main();
 int main_loop();
+int main_loop_fork();
 int startup();
 int waiting_for_client();
 int recieving_data();

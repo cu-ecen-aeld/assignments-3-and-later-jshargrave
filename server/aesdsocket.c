@@ -7,12 +7,25 @@
 
 
 
-int main()
+int main(int argc, char *argv[])
 {
+    if (argc >= 2 && strcmp(argv[1], "-d") == 0)
+    {
+        daemon_enabled = true;
+    }
+
     if (startup() != -1)
     {
-        main_loop();
+        if (daemon_enabled)
+        {
+            main_loop_fork();
+        }
+        else
+        {
+            main_loop();
+        }
     }
+
     shutting_down();
 
     return 0;
@@ -42,6 +55,68 @@ int main_loop()
         {
             sending_data();
         }
+    }
+    return 0;
+}
+
+int main_loop_fork()
+{
+    pid_t fork_pid = fork();
+    if (fork_pid == -1)
+    {
+        print_and_log(LOG_ERR, "%s\n", "Error: Failed to create child!");
+        return -1;
+    }
+    else if (fork_pid == 0)
+    {
+        // Child logic
+        int setsid_return_value = setsid();
+        if (setsid_return_value == -1)
+        {
+            print_and_log(LOG_ERR, "%s\n", "Error: setsid failed in child!");
+            return -1;
+        }
+
+        int chdir_return_value = chdir("/");
+        if (chdir_return_value == -1)
+        {
+            print_and_log(LOG_ERR, "%s\n", "Error: chdir failed in child!");
+            return -1;
+        }
+
+        // Redirect output
+        int fd = open("/dev/null", O_RDWR);
+        if (fd == -1)
+        {
+            print_and_log(LOG_ERR, "%s\n", "Error: Failed to get file descriptor for /dev/null in child!");
+            return -1;
+        }
+        if (dup2(fd, STDIN_FILENO) == -1)
+        {
+            print_and_log(LOG_ERR, "%s\n", "Error: Failed to redirect STDIN_FILENO to /dev/null in child!");
+            return -1;
+        }
+        if (dup2(fd, STDOUT_FILENO) == -1)
+        {
+            print_and_log(LOG_ERR, "%s\n", "Error: Failed to redirect STDOUT_FILENO to /dev/null in child!");
+            return -1;
+        }
+        if (dup2(fd, STDERR_FILENO) == -1)
+        {
+            print_and_log(LOG_ERR, "%s\n", "Error: Failed to redirect STDERR_FILENO to /dev/null in child!");
+            return -1;
+        }
+
+        close(fd);
+
+        // Start main loop
+        main_loop();
+        return 0;
+    }
+    else
+    {
+        // Parent logic
+        exit(0);
     }
     return 0;
 }
@@ -274,7 +349,7 @@ int shutting_down()
     if (socket_fd != -1)
     {
         close(socket_fd);
-        socket_fd = -1
+        socket_fd = -1;
     }
 
     if (client_fd != -1)
@@ -398,6 +473,6 @@ static void signal_handler(int signal_number)
 {
     if (signal_number == SIGINT || signal_number == SIGTERM)
     {
-        caught_signal = true;
+        caught_signal = 1;
     }
 }
