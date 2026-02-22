@@ -34,30 +34,146 @@ int main(int argc, char *argv[])
 int main_loop()
 {
     // Main loop
-    current_state = WaitingForClient;
+    int client_fd;
+    char ip_string[INET_ADDRSTRLEN];
+
+    current_state = Waiting;
+    bool caught_signal_prev = false;
     while (keep_looping)
     {
-        if (caught_signal && current_state == WaitingForClient)
+        // Print when we catch the signal
+        if (caught_signal && !caught_signal_prev)
         {
-           print_and_log(LOG_INFO, "%s\n", "Caught signal, exiting");
-           keep_looping = false;
-           continue;
+            caught_signal_prev = caught_signal;
+            print_and_log(LOG_INFO, "%s\n", "Caught signal, exiting");
         }
-        else if (current_state == WaitingForClient)
+
+        if (current_state == Waiting)
         {
-            waiting_for_client();
+            // Join any closed threads
+            join_closed_thread();
+
+            // If signal caught and all threads closed exit main loop
+            if (all_threads_closed() && caught_signal)
+            {
+                keep_looping = false;
+            }
+
+            // Don't accept any more connections once the signal is caught
+            if (!caught_signal)
+            {
+                check_for_client_connection(&client_fd, &ip_string[0], sizeof(ip_string));
+            }
         }
-        else if (current_state == RecievingData)
+        else if (current_state == CreatingThread)
         {
-            recieving_data();
-        }
-        else if (current_state == SendingData)
-        {
-            sending_data();
+            create_thread(client_fd, &ip_string[0], sizeof(ip_string));
+            current_state = Waiting;
         }
     }
     return 0;
 }
+
+void* main_loop_thread(void* thread_param)
+{
+    struct thread_data *thread_data_ptr = (struct thread_data *)thread_param;
+
+    enum ThreadState thread_state = WaitingForData;
+    bool keep_looping_thread = true;
+
+    char *recv_buffer = NULL;
+    size_t recv_buffer_size = 0;
+    size_t recv_buffer_allocated_size = 0;
+
+
+    while(keep_looping_thread)
+    {
+        if (thread_state == WaitingForData)
+        {
+            waiting_for_data(&thread_state, thread_data_ptr->client_fd, recv_buffer, &recv_buffer_size, &recv_buffer_allocated_size);
+        }
+        else if (thread_state == ClosedConnection)
+        {
+            keep_looping_thread = false;
+        }
+    }
+
+    thread_cleanup(thread_data_ptr->client_fd, recv_buffer);
+
+    return 0;
+}
+
+int create_thread(int c_fd, char* ip_string, size_t ip_string_size)
+{
+    // Setup linked list values
+    struct LinkedListItem *linked_list_item_ptr = NULL;
+
+    linked_list_item_ptr = malloc(sizeof(struct LinkedListItem));
+    if (linked_list_item_ptr == NULL)
+    {
+        // Memory not allocated
+        print_and_log(LOG_ERR, "Error: Failed to allocate memory for linked list item!/n");
+        return -1;
+    }
+    
+    linked_list_item_ptr->t_data.client_fd = c_fd;
+    void* memcpy_rv = memcpy(linked_list_item_ptr->client_ip_string, ip_string, ip_string_size);
+    if (memcpy_rv == NULL)
+    {
+        // Memory not allocated
+        print_and_log(LOG_ERR, "Error: Failed to copy ip string into linked list item!/n");
+        return -1;
+    }
+
+    int pthread_create_rv = pthread_create(&linked_list_item_ptr->thread_id, NULL, main_loop_thread, &linked_list_item_ptr->t_data);
+    if (pthread_create_rv != 0)
+    {
+        print_and_log(LOG_ERR, "%s\n", "Error: Failed to create thread!/n");
+        return -1;
+    }
+
+    SLIST_INSERT_HEAD(&linked_list, linked_list_item_ptr, LinkedListItems);
+
+    return 0;
+}
+
+int join_closed_thread()
+{
+    struct LinkedListItem* linked_list_item_ptr = NULL;
+    struct LinkedListItem* linked_list_item_ptr_temp = NULL;
+    void* thread_return = NULL;
+
+    SLIST_FOREACH_SAFE(linked_list_item_ptr, &linked_list, LinkedListItems, linked_list_item_ptr_temp)
+    {
+        int join_rv = pthread_tryjoin_np(linked_list_item_ptr->thread_id, thread_return);
+        
+        // Check if thread joined
+        if (join_rv == 0)
+        {
+            print_and_log(LOG_INFO, "Closed connection from %s\n", linked_list_item_ptr->client_ip_string);
+
+            // Cleanup
+            free(linked_list_item_ptr);
+            linked_list_item_ptr = NULL;
+            SLIST_REMOVE(&linked_list, linked_list_item_ptr, LinkedListItem, LinkedListItems);
+        }
+    }
+
+    return 0;
+}
+
+bool all_threads_closed()
+{
+    if (SLIST_EMPTY(&linked_list))
+    {
+        return true;
+    }
+    else
+    {
+        return false;
+    }
+}
+
 
 int main_loop_fork()
 {
@@ -125,6 +241,12 @@ int startup()
 {
     current_state = Startup;
 
+    // Linked List init
+    SLIST_INIT(&linked_list);
+
+    // Mutex
+    pthread_mutex_init(&file_mutex, NULL);
+
     // Setup logger
     openlog(NULL, LOG_ODELAY, LOG_USER);
     print_and_log(LOG_INFO, "%s\n", "AESD Socket Starting!");
@@ -187,11 +309,11 @@ int startup()
     return 0;
 }
 
-int waiting_for_client()
+int check_for_client_connection(int* c_fd, char* ip_string, int ip_string_size)
 {
     client_address_len = sizeof(client_address);
-    client_fd = accept(socket_fd, (struct sockaddr *)&client_address, &client_address_len);
-    if (client_fd == -1)
+    *c_fd = accept(socket_fd, (struct sockaddr *)&client_address, &client_address_len);
+    if (*c_fd == -1)
     {
         // If signal triggerd this fail don't print this error
         if (errno == EINTR && caught_signal)
@@ -203,17 +325,17 @@ int waiting_for_client()
     }
 
     // Print client IP address
-    get_client_ip_address(client_address, ip_string, sizeof(ip_string));
+    get_client_ip_address(client_address, ip_string, ip_string_size);
     print_and_log(LOG_INFO, "Accepted connection from %s\n", ip_string);
 
-    current_state = RecievingData;
+    current_state = CreatingThread;
     return 0;
 }
 
-int recieving_data()
+int waiting_for_data(enum ThreadState *t_state, int c_fd, char* r_buffer, size_t* r_buffer_size, size_t* r_buffer_allocated_size)
 {
-    char temp[RECV_BUFFER_SIZE];
-    ssize_t recv_bytes = recv(client_fd, temp, sizeof(temp), 0);
+    char recv_buffer_temp[RECV_BUFFER_SIZE];
+    ssize_t recv_bytes = recv(c_fd, recv_buffer_temp, sizeof(recv_buffer_temp), 0);
 
     if (recv_bytes == -1)
     {
@@ -224,44 +346,88 @@ int recieving_data()
     // Client closed connection
     if (recv_bytes == 0)
     {
-        print_and_log(LOG_INFO, "Closed connection from %s\n", ip_string);
-        close(client_fd);
-        current_state = WaitingForClient;
+        close(c_fd);
+        *t_state = ClosedConnection;
         return 0;
     }
-
-    // Grow buffer if needed
-    while (recv_allocated_size < recv_buffer_size + recv_bytes + 1)
+    else
     {
-        recv_allocated_size += RECV_BUFFER_SIZE;
-        char* recv_buffer_temp = realloc(recv_buffer, recv_allocated_size);
-        if (!recv_buffer_temp)
+        process_recieved_data(t_state, c_fd, r_buffer, r_buffer_size, r_buffer_allocated_size, &recv_buffer_temp[0], recv_bytes);
+    }
+
+    return 0;
+}
+
+int process_recieved_data(enum ThreadState *t_state, int c_fd, char* r_buffer, size_t* r_buffer_size, size_t* r_buffer_allocated_size, char* r_buffer_temp, size_t r_bytes)
+{
+    // Grow buffer if needed
+    while (*r_buffer_allocated_size < *r_buffer_size + r_bytes + 1)
+    {
+        *r_buffer_allocated_size += RECV_BUFFER_SIZE;
+        char* r_buffer_new = realloc(r_buffer, *r_buffer_allocated_size);
+        if (!r_buffer_new)
         {
-            keep_looping = false;
             return -1;
         }
 
-        recv_buffer = recv_buffer_temp;
+        r_buffer = r_buffer_new;
     }
 
     // Copy data to buffer
-    memcpy(recv_buffer + recv_buffer_size, temp, recv_bytes);
+    memcpy(r_buffer + *r_buffer_size, r_buffer_temp, r_bytes);
 
     // If newline recieved, write to file, and shift everything forward in the buffer
     int count = 0;
     bool found_packet_end = false;
     size_t new_packet_start = 0;
     size_t remaining = 0;
-    while (count < recv_bytes)
+    while (count < r_bytes)
     {
-        if (recv_buffer[recv_buffer_size + count] == PACKET_ENDING)
+        // Actions when we recieve complete packet
+        if (r_buffer[*r_buffer_size + count] == PACKET_ENDING)
         {
             found_packet_end = true;
-            write_to_file(FILE_PATH, recv_buffer, recv_buffer_size + count + 1);
 
-            new_packet_start = recv_buffer_size + count + 1;
-            remaining  = (size_t)recv_bytes - (count + 1);
-            memmove(recv_buffer, recv_buffer + new_packet_start, remaining);
+            if (get_file_mutex() == -1)
+            {
+                return -1;
+            }
+
+            int f_fd = open_file_for_read_write();
+            if (f_fd == -1)
+            {
+                release_file_mutex();
+                return -1;
+            }
+
+            if (write_to_file(f_fd, r_buffer, *r_buffer_size + count + 1) == -1)
+            {
+                close(f_fd);
+                release_file_mutex();
+                return -1;
+            }
+            
+            if (sending_data(t_state, c_fd, f_fd) == -1)
+            {
+                close(f_fd);
+                release_file_mutex();
+                return -1;
+            }
+
+            if (close(f_fd) == -1)
+            {
+                release_file_mutex();
+                return -1;
+            }
+
+            if (release_file_mutex() == -1)
+            {
+                return -1;
+            }
+
+            new_packet_start = *r_buffer_size + count + 1;
+            remaining  = (size_t)r_bytes - (count + 1);
+            memmove(r_buffer, r_buffer + new_packet_start, remaining);
             break;
         }
         count++;
@@ -269,44 +435,72 @@ int recieving_data()
 
     if (found_packet_end)
     {
-        recv_buffer_size = remaining;
-        current_state = SendingData;
+        *r_buffer_size = remaining;
     }
     else
     {
-        recv_buffer_size += recv_bytes;
+        *r_buffer_size += r_bytes;
     }
 
-    recv_buffer[recv_buffer_size] = '\0'; // Null terminate for printouts
+    r_buffer[*r_buffer_size] = '\0'; // Null terminate for printouts
     return 0;
 }
 
-int sending_data()
+int get_file_mutex()
 {
-    // Open the file for reading
-    int fd = open(FILE_PATH, O_RDONLY);
+    // Get mutex
+    int rc = pthread_mutex_lock(&file_mutex);
+    if (rc != 0)
+    {
+        print_and_log(LOG_ERR, "Error: Failed to get file mutex!\n");
+        return -1;
+    }
+    return 0;
+}
+
+int release_file_mutex()
+{
+    // Release mutex
+    int rc = pthread_mutex_unlock(&file_mutex);
+    if (rc != 0)
+    {
+        print_and_log(LOG_ERR, "Error: Failed to release file mutex!\n");
+        return -1;
+    }
+    return 0;
+}
+
+int open_file_for_read_write()
+{
+    // Open the file for writing
+    int fd = open(FILE_PATH, O_RDWR | O_CREAT | O_APPEND, 0644);
     if (fd == -1)
     {
-        print_and_log(LOG_ERR, "Error: Failed to open file '%s' for reading!\n", FILE_PATH);
+        print_and_log(LOG_ERR, "Error: Failed to open file '%s' for writing!\n", FILE_PATH);
+        pthread_mutex_unlock(&file_mutex);
         return -1;
     }
 
+    return fd;
+}
+
+int sending_data(enum ThreadState *t_state, int c_fd, int f_fd)
+{
     // Read the data from the file
     char send_buffer[SEND_BUFFER_SIZE];
     ssize_t bytes_read;
     ssize_t sent_bytes;
     ssize_t total_bytes_sent;
-    while ((bytes_read = read(fd, send_buffer, sizeof(send_buffer))) > 0)
+    while ((bytes_read = read_from_file(f_fd, send_buffer, sizeof(send_buffer))) > 0)
     {
         total_bytes_sent = 0;
 
         while (total_bytes_sent < bytes_read)
         {
-            sent_bytes = send(client_fd, send_buffer + total_bytes_sent, bytes_read - total_bytes_sent, 0);
+            sent_bytes = send(c_fd, send_buffer + total_bytes_sent, bytes_read - total_bytes_sent, 0);
             if (sent_bytes == -1)
             {
                 print_and_log(LOG_ERR, "%s\n", "Error: Failed to send data to client!");
-                close(fd);
                 return -1;
             }
             total_bytes_sent += sent_bytes;
@@ -316,14 +510,28 @@ int sending_data()
     if (bytes_read == -1)
     {
         print_and_log(LOG_ERR, "Error: Failed to read from file '%s'!\n", FILE_PATH);
-        close(fd);
         return -1;
     }
 
-    close(fd);
-    current_state = RecievingData;
+    *t_state = WaitingForData;
 
     return 0;
+}
+
+void thread_cleanup(int c_fd, char* r_buffer)
+{
+    if (c_fd != -1)
+    {
+        close(c_fd);
+        c_fd = -1;
+    }
+
+    // Free buffers
+    if (r_buffer)
+    {
+        free(r_buffer);
+        r_buffer = NULL;
+    }
 }
 
 int shutting_down()
@@ -331,13 +539,6 @@ int shutting_down()
     current_state = ShuttingDown;
 
     print_and_log(LOG_INFO, "%s\n", "AESD Socket Stopping!");
-
-    // Free buffers
-    if (recv_buffer)
-    {
-        free(recv_buffer);
-        recv_buffer = NULL;
-    }
 
     if (res)
     {
@@ -350,12 +551,6 @@ int shutting_down()
     {
         close(socket_fd);
         socket_fd = -1;
-    }
-
-    if (client_fd != -1)
-    {
-        close(client_fd);
-        client_fd = -1;
     }
 
     // Delete tmp file
@@ -383,71 +578,42 @@ void print_and_log(int level, const char *format, ...)
     va_end(args);
 }
 
-void process_client_data(const char *data, ssize_t data_length)
+int write_to_file(int fd, const char *data, ssize_t data_length)
 {
-    // Process the received data here
-    // For example, you can print it to the console or log it
-    printf("Received data: %.*s\n", (int)data_length, data);
-
-    for(int i = 0; i < data_length; i++)
-    {
-        if (data[i] == '\n')
-        {
-            printf("Newline character found at index %d\n", i);
-        }
-    }
-}
-
-int write_to_file(const char *filename, const char *data, ssize_t data_length)
-{
-    // Open the file for writing
-    int fd = open(filename, O_WRONLY | O_CREAT | O_APPEND, 0644);
-    if (fd == -1)
-    {
-        print_and_log(LOG_ERR, "Error: Failed to open file '%s' for writing!\n", filename);
-        return -1;
-    }
-
     // Write the data to the file
     ssize_t bytes_written = write(fd, data, data_length);
     if (bytes_written == -1)
     {
-        print_and_log(LOG_ERR, "Error: Failed to write to file '%s'!\n", filename);
-        close(fd);
+        print_and_log(LOG_ERR, "Error: Failed to write to file!\n");
+        return -1;
+    }
+
+    if (bytes_written != data_length)
+    {
+        print_and_log(LOG_ERR, "Error: Did not write all bytes to file!\n");
         return -1;
     }
 
     // Close the file descriptor
-    close(fd);
     return bytes_written;
 }
 
-int read_from_file(const char *filename, char *buffer, size_t buffer_size)
+int read_from_file(int fd, char *buffer, size_t buffer_size)
 {
-    // Open the file for reading
-    int fd = open(filename, O_RDONLY);
-    if (fd == -1)
-    {
-        print_and_log(LOG_ERR, "Error: Failed to open file '%s' for reading!\n", filename);
-        return -1;
-    }
-
     // Read the data from the file
     ssize_t bytes_read = read(fd, buffer, buffer_size - 1); // Leave space for null terminator
     if (bytes_read == -1)
     {
-        print_and_log(LOG_ERR, "Error: Failed to read from file '%s'!\n", filename);
-        close(fd);
+        print_and_log(LOG_ERR, "Error: Failed to read from file '%s'!\n");
         return -1;
     }
     else
     {
         buffer[bytes_read] = '\0'; // Null-terminate the buffer
-        print_and_log(LOG_INFO, "Successfully read %zd bytes from file '%s'\n", bytes_read, filename);
+        print_and_log(LOG_INFO, "Successfully read %zd bytes from file '%s'\n", bytes_read);
     }
 
     // Close the file descriptor
-    close(fd);
     return bytes_read;
 }
 
