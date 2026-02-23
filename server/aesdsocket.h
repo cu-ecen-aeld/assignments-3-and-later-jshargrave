@@ -33,7 +33,7 @@
 #define SEND_BUFFER_SIZE 1024
 #define FILE_PATH "/var/tmp/aesdsocketdata"
 #define PACKET_ENDING '\n'
-#define TIME_FORMAT "%Y-%m-%dT%T\n"
+#define TIME_FORMAT "timestamp:%Y-%m-%dT%T\n"
 #define TIME_BUFFER_SIZE 256
 
 // STATES
