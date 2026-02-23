@@ -39,6 +39,12 @@ int main_loop()
 
     current_state = Waiting;
     bool caught_signal_prev = false;
+
+    // Time
+    struct timespec tp;
+    clock_gettime(CLOCK_MONOTONIC, &tp);
+    time_t next_timestamp = tp.tv_sec + 10;
+
     while (keep_looping)
     {
         // Print when we catch the signal
@@ -46,6 +52,14 @@ int main_loop()
         {
             caught_signal_prev = caught_signal;
             print_and_log(LOG_INFO, "%s\n", "Caught signal, exiting");
+        }
+
+        // Write time stamp if 10 sec passed
+        clock_gettime(CLOCK_MONOTONIC, &tp);
+        if (tp.tv_sec >= next_timestamp)
+        {
+            next_timestamp = tp.tv_sec + 10;
+            write_time_stamp();
         }
 
         if (current_state == Waiting)
@@ -73,6 +87,65 @@ int main_loop()
     }
     return 0;
 }
+
+int write_time_stamp()
+{
+    print_and_log(LOG_INFO, "Writing timestamp!\n");
+
+    // Get the local time and store in char array
+    time_t epoch_time;
+    struct tm *local_time;
+    char time_buffer[TIME_BUFFER_SIZE];
+    time(&epoch_time);
+    local_time = localtime(&epoch_time);
+    size_t strftime_rv = strftime(&time_buffer[0], sizeof(time_buffer), TIME_FORMAT, local_time);
+    if (strftime_rv == 0)
+    {
+        print_and_log(LOG_ERR, "Error: Failed to format the time!\n");
+        return -1;
+    }
+
+    // Get mutex
+    if (get_file_mutex() == -1)
+    {
+        print_and_log(LOG_ERR, "Error: Failed to get mutex!\n");
+        return -1;
+    }
+
+    int f_fd = open_file_for_read_write();
+    if (f_fd == -1)
+    {
+        print_and_log(LOG_ERR, "Error: Failed to open file '%s'!\n", FILE_PATH);
+        release_file_mutex();
+        return -1;
+    }
+
+
+
+    if (write_to_file(f_fd, time_buffer, strlen(time_buffer)) == -1)
+    {
+        print_and_log(LOG_ERR, "Error: Failed to write to file '%s'!\n", FILE_PATH);
+        close(f_fd);
+        release_file_mutex();
+        return -1;
+    }
+
+    if (close(f_fd) == -1)
+    {
+        print_and_log(LOG_ERR, "Error: Failed to close file '%s'!\n", FILE_PATH);
+        release_file_mutex();
+        return -1;
+    }
+
+    if (release_file_mutex() == -1)
+    {
+        print_and_log(LOG_ERR, "Error: Failed to release mutex!\n");
+        return -1;
+    }
+
+    return 0;
+}
+
 
 void* main_loop_thread(void* thread_param)
 {
@@ -361,6 +434,20 @@ int startup()
         return -1;
     }
 
+    // Change socket to NonBlocking
+    int flags = fcntl(socket_fd, F_GETFL, 0);
+    if (flags == -1)
+    {
+        print_and_log(LOG_ERR, "%s\n", "Error: Failed to get socket flags!");
+        return -1;
+    }
+
+    if (fcntl(socket_fd, F_SETFL, flags | O_NONBLOCK) == -1)
+    {
+        print_and_log(LOG_ERR, "%s\n", "Error: Failed to set socket non-blocking!");
+        return -1;
+    }
+
     return 0;
 }
 
@@ -375,7 +462,6 @@ int check_for_client_connection(int* c_fd, char* ip_string, int ip_string_size)
         {
             return 0;
         }
-        print_and_log(LOG_ERR, "%s\n", "Error: Failed to accept client connection!");
         return -1;
     }
 

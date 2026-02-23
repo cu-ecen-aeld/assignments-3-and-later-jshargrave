@@ -24,6 +24,7 @@
 #include <signal.h>
 #include <errno.h>
 #include <pthread.h>
+#include <time.h>
 #include "queue.h"
 
 #define SOCKET_PORT "9000"
@@ -32,6 +33,8 @@
 #define SEND_BUFFER_SIZE 1024
 #define FILE_PATH "/var/tmp/aesdsocketdata"
 #define PACKET_ENDING '\n'
+#define TIME_FORMAT "%Y-%m-%dT%T\n"
+#define TIME_BUFFER_SIZE 256
 
 // STATES
 enum State { 
@@ -39,7 +42,8 @@ enum State {
     Startup,
     CreatingThread,
     ShuttingDown,
-    Waiting
+    Waiting,
+    WritingTimeStamp
 };
 
 // THREAD
@@ -96,8 +100,6 @@ static volatile sig_atomic_t caught_signal = 0;
 // Argument Flags
 bool daemon_enabled = false;
 
-
-
 /*
     Main entry point into the program. Handles argument parsing and splits 
     depending on if the user passed the daemon arguemnt.
@@ -134,5 +136,6 @@ int create_thread(int c_fd, char* ip_string, size_t ip_string_size);
 void thread_cleanup(struct BufferData* rb_data, struct BufferData* rb_data_buffer);
 int release_file_mutex();
 int get_file_mutex();
+int write_time_stamp();
 
 #endif
