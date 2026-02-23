@@ -51,7 +51,7 @@ int main_loop()
         if (current_state == Waiting)
         {
             // Join any closed threads
-            join_closed_thread();
+            join_threads();
 
             // If signal caught and all threads closed exit main loop
             if (all_threads_closed() && caught_signal)
@@ -92,17 +92,32 @@ void* main_loop_thread(void* thread_param)
 
     while(keep_looping_thread)
     {
+        // Exit all threads if signal received
+        if (caught_signal)
+        {
+            keep_looping_thread = false;
+        }
+
         if (thread_data_ptr->thread_state == WaitingForData)
         {
-            waiting_for_data(thread_data_ptr, receive_buffer_data, receive_buffer_data_new);
+            if (waiting_for_data(thread_data_ptr, receive_buffer_data, receive_buffer_data_new) == -1)
+            {
+                thread_data_ptr->thread_state = ClosedConnection;
+            }
         }
         else if (thread_data_ptr->thread_state == ProcessingData)
         {
-            process_received_data(thread_data_ptr, receive_buffer_data, receive_buffer_data_new);
+            if (process_received_data(thread_data_ptr, receive_buffer_data, receive_buffer_data_new) == -1)
+            {
+                thread_data_ptr->thread_state = ClosedConnection;
+            }
         }
         else if (thread_data_ptr->thread_state == SendingData)
         {
-            sending_data(thread_data_ptr, receive_buffer_data, receive_buffer_data_new);
+            if (sending_data(thread_data_ptr, receive_buffer_data, receive_buffer_data_new) == -1)
+            {
+                thread_data_ptr->thread_state = ClosedConnection;
+            }
         }
         else if (thread_data_ptr->thread_state == ClosedConnection)
         {
@@ -162,7 +177,7 @@ int create_thread(int c_fd, char* ip_string, size_t ip_string_size)
     return 0;
 }
 
-int join_closed_thread()
+int join_threads()
 {
     struct LinkedListItem* linked_list_item_ptr = NULL;
     struct LinkedListItem* linked_list_item_ptr_temp = NULL;
@@ -482,6 +497,9 @@ int sending_data(struct ThreadData *t_data, struct BufferData *rb_data, struct B
     // Reset receive buffer
     rb_data->size = 0;
 
+    // Reset file to start
+    lseek(f_fd, 0, SEEK_SET);
+
     // Read all bytes from file and send back to client
     char send_buffer[SEND_BUFFER_SIZE];
     ssize_t bytes_read;
@@ -498,6 +516,8 @@ int sending_data(struct ThreadData *t_data, struct BufferData *rb_data, struct B
             if (sent_bytes == -1)
             {
                 print_and_log(LOG_ERR, "%s\n", "Error: Failed to send data to client!");
+                close(f_fd);
+                release_file_mutex();
                 return -1;
             }
             total_bytes_sent += sent_bytes;
@@ -507,6 +527,8 @@ int sending_data(struct ThreadData *t_data, struct BufferData *rb_data, struct B
     if (bytes_read == -1)
     {
         print_and_log(LOG_ERR, "Error: Failed to read from file '%s'!\n", FILE_PATH);
+        close(f_fd);
+        release_file_mutex();
         return -1;
     }
 
@@ -568,7 +590,6 @@ int open_file_for_read_write()
     if (fd == -1)
     {
         print_and_log(LOG_ERR, "Error: Failed to open file '%s' for writing!\n", FILE_PATH);
-        pthread_mutex_unlock(&file_mutex);
         return -1;
     }
 
@@ -671,13 +692,13 @@ int read_from_file(int fd, char *buffer, size_t buffer_size)
     ssize_t bytes_read = read(fd, buffer, buffer_size - 1); // Leave space for null terminator
     if (bytes_read == -1)
     {
-        print_and_log(LOG_ERR, "Error: Failed to read from file '%s'!\n");
+        print_and_log(LOG_ERR, "Error: Failed to read from file!\n");
         return -1;
     }
     else
     {
         buffer[bytes_read] = '\0'; // Null-terminate the buffer
-        print_and_log(LOG_INFO, "Successfully read %zd bytes from file '%s'\n", bytes_read);
+        print_and_log(LOG_INFO, "Successfully read %zd bytes from file!\n", bytes_read);
     }
 
     // Close the file descriptor

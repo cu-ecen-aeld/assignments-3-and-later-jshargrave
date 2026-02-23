@@ -102,7 +102,7 @@ bool daemon_enabled = false;
     Main entry point into the program. Handles argument parsing and splits 
     depending on if the user passed the daemon arguemnt.
 */
-int main();
+int main(int argc, char *argv[]);
 
 /*
     Main loop where the main thread waits for connections from clients, 
@@ -128,7 +128,7 @@ int read_from_file(int fd, char *buffer, size_t buffer_size);
 int get_file_size(const char *filename);
 void get_client_ip_address(struct sockaddr_storage client_address, char* ip_string, size_t ip_string_size);
 static void signal_handler(int signal_number);
-int join_closed_thread();
+int join_threads();
 bool all_threads_closed();
 int create_thread(int c_fd, char* ip_string, size_t ip_string_size);
 void thread_cleanup(struct BufferData* rb_data, struct BufferData* rb_data_buffer);
