@@ -76,59 +76,84 @@ int main_loop()
 
 void* main_loop_thread(void* thread_param)
 {
-    struct thread_data *thread_data_ptr = (struct thread_data *)thread_param;
+    struct ThreadData *thread_data_ptr = (struct ThreadData *)thread_param;
 
-    enum ThreadState thread_state = WaitingForData;
     bool keep_looping_thread = true;
 
-    char *recv_buffer = NULL;
-    size_t recv_buffer_size = 0;
-    size_t recv_buffer_allocated_size = 0;
+    struct BufferData *receive_buffer_data = malloc(sizeof(struct BufferData));
+    receive_buffer_data->buffer = NULL;
+    receive_buffer_data->allocated = 0;
+    receive_buffer_data->size = 0;
 
+    struct BufferData *receive_buffer_data_new = malloc(sizeof(struct BufferData));
+    receive_buffer_data_new->buffer = malloc(RECV_BUFFER_TEMP_SIZE);
+    receive_buffer_data_new->allocated = RECV_BUFFER_TEMP_SIZE;
+    receive_buffer_data_new->size = 0;
 
     while(keep_looping_thread)
     {
-        if (thread_state == WaitingForData)
+        if (thread_data_ptr->thread_state == WaitingForData)
         {
-            waiting_for_data(&thread_state, thread_data_ptr->client_fd, recv_buffer, &recv_buffer_size, &recv_buffer_allocated_size);
+            waiting_for_data(thread_data_ptr, receive_buffer_data, receive_buffer_data_new);
         }
-        else if (thread_state == ClosedConnection)
+        else if (thread_data_ptr->thread_state == ProcessingData)
+        {
+            process_received_data(thread_data_ptr, receive_buffer_data, receive_buffer_data_new);
+        }
+        else if (thread_data_ptr->thread_state == SendingData)
+        {
+            sending_data(thread_data_ptr, receive_buffer_data, receive_buffer_data_new);
+        }
+        else if (thread_data_ptr->thread_state == ClosedConnection)
         {
             keep_looping_thread = false;
         }
     }
 
-    thread_cleanup(thread_data_ptr->client_fd, recv_buffer);
+    // Cleanup local thread variables
+    thread_cleanup(receive_buffer_data, receive_buffer_data_new);
 
-    return 0;
+    return thread_data_ptr;
 }
 
 int create_thread(int c_fd, char* ip_string, size_t ip_string_size)
 {
-    // Setup linked list values
+    // Setup linked list and thread data values
     struct LinkedListItem *linked_list_item_ptr = NULL;
+    struct ThreadData * thread_data_ptr = NULL;
 
     linked_list_item_ptr = malloc(sizeof(struct LinkedListItem));
     if (linked_list_item_ptr == NULL)
     {
         // Memory not allocated
-        print_and_log(LOG_ERR, "Error: Failed to allocate memory for linked list item!/n");
+        print_and_log(LOG_ERR, "Error: Failed to allocate memory for linked list item!\n");
         return -1;
     }
     
-    linked_list_item_ptr->t_data.client_fd = c_fd;
     void* memcpy_rv = memcpy(linked_list_item_ptr->client_ip_string, ip_string, ip_string_size);
     if (memcpy_rv == NULL)
     {
         // Memory not allocated
-        print_and_log(LOG_ERR, "Error: Failed to copy ip string into linked list item!/n");
+        print_and_log(LOG_ERR, "Error: Failed to copy ip string into linked list item!\n");
         return -1;
     }
 
-    int pthread_create_rv = pthread_create(&linked_list_item_ptr->thread_id, NULL, main_loop_thread, &linked_list_item_ptr->t_data);
+    thread_data_ptr = malloc(sizeof(struct ThreadData));
+    if (thread_data_ptr == NULL)
+    {
+        // Memory not allocated
+        print_and_log(LOG_ERR, "Error: Failed to allocate memory for thread data!\n");
+        return -1;
+    }
+
+    thread_data_ptr->client_fd = c_fd;
+    thread_data_ptr->thread_state = WaitingForData;
+
+
+    int pthread_create_rv = pthread_create(&linked_list_item_ptr->thread_id, NULL, main_loop_thread, thread_data_ptr);
     if (pthread_create_rv != 0)
     {
-        print_and_log(LOG_ERR, "%s\n", "Error: Failed to create thread!/n");
+        print_and_log(LOG_ERR, "%s\n", "Error: Failed to create thread!\n");
         return -1;
     }
 
@@ -141,21 +166,36 @@ int join_closed_thread()
 {
     struct LinkedListItem* linked_list_item_ptr = NULL;
     struct LinkedListItem* linked_list_item_ptr_temp = NULL;
+    struct ThreadData *thread_data_ptr;
     void* thread_return = NULL;
 
     SLIST_FOREACH_SAFE(linked_list_item_ptr, &linked_list, LinkedListItems, linked_list_item_ptr_temp)
     {
-        int join_rv = pthread_tryjoin_np(linked_list_item_ptr->thread_id, thread_return);
+        int join_rv = pthread_tryjoin_np(linked_list_item_ptr->thread_id, &thread_return);
         
         // Check if thread joined
         if (join_rv == 0)
         {
             print_and_log(LOG_INFO, "Closed connection from %s\n", linked_list_item_ptr->client_ip_string);
+            
+            thread_data_ptr = (struct ThreadData *)thread_return;
+            close(thread_data_ptr->client_fd);
+
+            // Remove Linked List item
+            SLIST_REMOVE(&linked_list, linked_list_item_ptr, LinkedListItem, LinkedListItems);
 
             // Cleanup
-            free(linked_list_item_ptr);
-            linked_list_item_ptr = NULL;
-            SLIST_REMOVE(&linked_list, linked_list_item_ptr, LinkedListItem, LinkedListItems);
+            if (linked_list_item_ptr != NULL)
+            {
+                free(linked_list_item_ptr);
+                linked_list_item_ptr = NULL;
+            }
+
+            if (thread_data_ptr != NULL)
+            {
+                free(thread_data_ptr);
+                thread_data_ptr = NULL;
+            }
         }
     }
 
@@ -332,117 +372,168 @@ int check_for_client_connection(int* c_fd, char* ip_string, int ip_string_size)
     return 0;
 }
 
-int waiting_for_data(enum ThreadState *t_state, int c_fd, char* r_buffer, size_t* r_buffer_size, size_t* r_buffer_allocated_size)
+int waiting_for_data(struct ThreadData *t_data, struct BufferData *rb_data, struct BufferData *rb_data_new)
 {
-    char recv_buffer_temp[RECV_BUFFER_SIZE];
-    ssize_t recv_bytes = recv(c_fd, recv_buffer_temp, sizeof(recv_buffer_temp), 0);
+    // Get data from client
+    ssize_t received_bytes = recv(t_data->client_fd, rb_data_new->buffer, rb_data_new->allocated, 0);
 
-    if (recv_bytes == -1)
+    if (received_bytes == -1)
     {
         print_and_log(LOG_ERR, "%s\n", "Error: Failed to receive data from client!");
         return -1;
     }
 
     // Client closed connection
-    if (recv_bytes == 0)
+    if (received_bytes == 0)
     {
-        close(c_fd);
-        *t_state = ClosedConnection;
+        t_data->thread_state = ClosedConnection;
         return 0;
     }
-    else
-    {
-        process_recieved_data(t_state, c_fd, r_buffer, r_buffer_size, r_buffer_allocated_size, &recv_buffer_temp[0], recv_bytes);
-    }
 
-    return 0;
-}
+    rb_data_new->size = received_bytes;
 
-int process_recieved_data(enum ThreadState *t_state, int c_fd, char* r_buffer, size_t* r_buffer_size, size_t* r_buffer_allocated_size, char* r_buffer_temp, size_t r_bytes)
-{
     // Grow buffer if needed
-    while (*r_buffer_allocated_size < *r_buffer_size + r_bytes + 1)
+    while (rb_data->allocated < rb_data->size + rb_data_new->size)
     {
-        *r_buffer_allocated_size += RECV_BUFFER_SIZE;
-        char* r_buffer_new = realloc(r_buffer, *r_buffer_allocated_size);
+        rb_data->allocated += RECV_BUFFER_GROW_SIZE;
+        char* r_buffer_new = realloc(rb_data->buffer, rb_data->allocated);
         if (!r_buffer_new)
         {
             return -1;
         }
 
-        r_buffer = r_buffer_new;
+        rb_data->buffer = r_buffer_new;
     }
 
-    // Copy data to buffer
-    memcpy(r_buffer + *r_buffer_size, r_buffer_temp, r_bytes);
+    // Ready to proccess data
+    t_data->thread_state = ProcessingData;
+    return 0;
+}
 
-    // If newline recieved, write to file, and shift everything forward in the buffer
-    int count = 0;
-    bool found_packet_end = false;
-    size_t new_packet_start = 0;
-    size_t remaining = 0;
-    while (count < r_bytes)
+size_t process_received_data(struct ThreadData *t_data, struct BufferData *rb_data, struct BufferData *rb_data_new)
+{
+    size_t index = 0;
+    bool found_end = false;
+    while (index < rb_data_new->size)
     {
-        // Actions when we recieve complete packet
-        if (r_buffer[*r_buffer_size + count] == PACKET_ENDING)
+        // If we receive a complete packet then break out of loop
+        if (rb_data_new->buffer[index] == PACKET_ENDING)
         {
-            found_packet_end = true;
-
-            if (get_file_mutex() == -1)
-            {
-                return -1;
-            }
-
-            int f_fd = open_file_for_read_write();
-            if (f_fd == -1)
-            {
-                release_file_mutex();
-                return -1;
-            }
-
-            if (write_to_file(f_fd, r_buffer, *r_buffer_size + count + 1) == -1)
-            {
-                close(f_fd);
-                release_file_mutex();
-                return -1;
-            }
-            
-            if (sending_data(t_state, c_fd, f_fd) == -1)
-            {
-                close(f_fd);
-                release_file_mutex();
-                return -1;
-            }
-
-            if (close(f_fd) == -1)
-            {
-                release_file_mutex();
-                return -1;
-            }
-
-            if (release_file_mutex() == -1)
-            {
-                return -1;
-            }
-
-            new_packet_start = *r_buffer_size + count + 1;
-            remaining  = (size_t)r_bytes - (count + 1);
-            memmove(r_buffer, r_buffer + new_packet_start, remaining);
+            found_end = true;
             break;
         }
-        count++;
+        index++;
     }
 
-    if (found_packet_end)
+    // If we found end byte then transition to sending data, otherwise wait for additional data
+    if (found_end)
     {
-        *r_buffer_size = remaining;
+        // Copy data up to new packet into main buffer
+        memcpy(rb_data->buffer + rb_data->size, rb_data_new->buffer, index + 1);
+        rb_data->size += index + 1;
+
+        // Re-size new buffer data
+        memmove(rb_data_new->buffer, rb_data_new->buffer + (index + 1), rb_data_new->size - (index + 1));
+        rb_data_new->size -= index + 1;
+
+        // Send data
+        t_data->thread_state = SendingData;
     }
     else
     {
-        *r_buffer_size += r_bytes;
+        // Copy all data into main buffer
+        memcpy(rb_data->buffer + rb_data->size, rb_data_new->buffer, rb_data_new->size);
+        rb_data->size += rb_data_new->size;
+
+        // Resize new buffer data
+        rb_data_new->size = 0;
+
+        // Wait for more data
+        t_data->thread_state = WaitingForData;
     }
 
-    r_buffer[*r_buffer_size] = '\0'; // Null terminate for printouts
+    return 0;
+}
+
+int sending_data(struct ThreadData *t_data, struct BufferData *rb_data, struct BufferData *rb_data_temp)
+{
+    // Get mutex
+    if (get_file_mutex() == -1)
+    {
+        return -1;
+    }
+
+    int f_fd = open_file_for_read_write();
+    if (f_fd == -1)
+    {
+        print_and_log(LOG_ERR, "Error: Failed to open file '%s'!\n", FILE_PATH);
+        release_file_mutex();
+        return -1;
+    }
+
+    if (write_to_file(f_fd, rb_data->buffer, rb_data->size) == -1)
+    {
+        print_and_log(LOG_ERR, "Error: Failed to write to file '%s'!\n", FILE_PATH);
+        close(f_fd);
+        release_file_mutex();
+        return -1;
+    }
+
+    // Reset receive buffer
+    rb_data->size = 0;
+
+    // Read all bytes from file and send back to client
+    char send_buffer[SEND_BUFFER_SIZE];
+    ssize_t bytes_read;
+    ssize_t sent_bytes;
+    ssize_t total_bytes_sent;
+    while ((bytes_read = read_from_file(f_fd, send_buffer, sizeof(send_buffer))) > 0)
+    {
+        total_bytes_sent = 0;
+
+        // Send loop
+        while (total_bytes_sent < bytes_read)
+        {
+            sent_bytes = send(t_data->client_fd, send_buffer + total_bytes_sent, bytes_read - total_bytes_sent, 0);
+            if (sent_bytes == -1)
+            {
+                print_and_log(LOG_ERR, "%s\n", "Error: Failed to send data to client!");
+                return -1;
+            }
+            total_bytes_sent += sent_bytes;
+        }
+    }
+
+    if (bytes_read == -1)
+    {
+        print_and_log(LOG_ERR, "Error: Failed to read from file '%s'!\n", FILE_PATH);
+        return -1;
+    }
+
+    if (close(f_fd) == -1)
+    {
+        print_and_log(LOG_ERR, "Error: Failed to close file '%s'!\n", FILE_PATH);
+        release_file_mutex();
+        return -1;
+    }
+
+    if (release_file_mutex() == -1)
+    {
+        print_and_log(LOG_ERR, "Error: Failed to release mutex!\n");
+        return -1;
+    }
+
+    // Transition back to processing if there is still more data to process
+    // Otherwise wait for more data from client
+    if (rb_data_temp->size > 0)
+    {
+        t_data->thread_state = ProcessingData;
+    }
+    else
+    {
+        t_data->thread_state = WaitingForData;
+    }
+
     return 0;
 }
 
@@ -484,53 +575,29 @@ int open_file_for_read_write()
     return fd;
 }
 
-int sending_data(enum ThreadState *t_state, int c_fd, int f_fd)
+void thread_cleanup(struct BufferData* rb_data, struct BufferData* rb_data_new)
 {
-    // Read the data from the file
-    char send_buffer[SEND_BUFFER_SIZE];
-    ssize_t bytes_read;
-    ssize_t sent_bytes;
-    ssize_t total_bytes_sent;
-    while ((bytes_read = read_from_file(f_fd, send_buffer, sizeof(send_buffer))) > 0)
-    {
-        total_bytes_sent = 0;
-
-        while (total_bytes_sent < bytes_read)
-        {
-            sent_bytes = send(c_fd, send_buffer + total_bytes_sent, bytes_read - total_bytes_sent, 0);
-            if (sent_bytes == -1)
-            {
-                print_and_log(LOG_ERR, "%s\n", "Error: Failed to send data to client!");
-                return -1;
-            }
-            total_bytes_sent += sent_bytes;
-        }
-    }
-
-    if (bytes_read == -1)
-    {
-        print_and_log(LOG_ERR, "Error: Failed to read from file '%s'!\n", FILE_PATH);
-        return -1;
-    }
-
-    *t_state = WaitingForData;
-
-    return 0;
-}
-
-void thread_cleanup(int c_fd, char* r_buffer)
-{
-    if (c_fd != -1)
-    {
-        close(c_fd);
-        c_fd = -1;
-    }
-
     // Free buffers
-    if (r_buffer)
+    if (rb_data)
     {
-        free(r_buffer);
-        r_buffer = NULL;
+        if (rb_data->buffer)
+        {
+            free(rb_data->buffer);
+            rb_data->buffer = NULL;
+        }
+        free(rb_data);
+        rb_data = NULL;
+    }
+
+    if (rb_data_new)
+    {
+        if (rb_data_new->buffer)
+        {
+            free(rb_data_new->buffer);
+            rb_data_new->buffer = NULL;
+        }
+        free(rb_data_new);
+        rb_data_new = NULL;
     }
 }
 

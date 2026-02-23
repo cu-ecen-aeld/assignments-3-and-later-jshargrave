@@ -3,6 +3,9 @@
     Date: 2/15/2026
 */
 
+#ifndef AESD_SOCKET
+#define AESD_SOCKET
+
 #define _GNU_SOURCE
 #include <sys/types.h>
 #include <sys/socket.h>
@@ -24,7 +27,8 @@
 #include "queue.h"
 
 #define SOCKET_PORT "9000"
-#define RECV_BUFFER_SIZE 1024
+#define RECV_BUFFER_GROW_SIZE 1024
+#define RECV_BUFFER_TEMP_SIZE 1024
 #define SEND_BUFFER_SIZE 1024
 #define FILE_PATH "/var/tmp/aesdsocketdata"
 #define PACKET_ENDING '\n'
@@ -43,11 +47,13 @@ enum ThreadState
 {
     SendingData,
     WaitingForData,
+    ProcessingData,
     ClosedConnection
 };
 
-struct thread_data{
+struct ThreadData{
     int client_fd;
+    enum ThreadState thread_state;
     bool thread_complete_success;
 };
 
@@ -56,7 +62,6 @@ struct LinkedListItem
 {
     pthread_t thread_id;
     char client_ip_string[INET_ADDRSTRLEN];
-    struct thread_data t_data;
     SLIST_ENTRY(LinkedListItem) LinkedListItems;
 };
 
@@ -66,6 +71,14 @@ struct LinkedListHead linked_list;
 
 // MUTEX
 pthread_mutex_t file_mutex;
+
+// Buffer structure
+struct BufferData
+{
+    char* buffer;
+    size_t size;
+    size_t allocated;
+};
 
 // Variable Setup
 enum State current_state = None;
@@ -86,12 +99,15 @@ bool daemon_enabled = false;
 
 
 /*
-
+    Main entry point into the program. Handles argument parsing and splits 
+    depending on if the user passed the daemon arguemnt.
 */
 int main();
 
 /*
-
+    Main loop where the main thread waits for connections from clients, 
+    starts threads, and joins threads. No more client connections are 
+    accepted after catching exit signals.
 */
 int main_loop();
 
@@ -100,12 +116,12 @@ void* main_loop_thread(void* thread_param);
 int main_loop_fork();
 int startup();
 int check_for_client_connection(int* c_fd, char* ip_string, int ip_string_size);
-int waiting_for_data(enum ThreadState *t_state, int c_fd, char* r_buffer, size_t* r_buffer_size, size_t* r_buffer_allocated_size);
-int sending_data(enum ThreadState *t_state, int c_fd, int f_fd);
+int waiting_for_data(struct ThreadData *t_data, struct BufferData *rb_data, struct BufferData *rb_data_temp);
+int sending_data(struct ThreadData *t_data, struct BufferData *rb_data, struct BufferData *rb_data_new);
+size_t process_received_data(struct ThreadData *t_data, struct BufferData *rb_data, struct BufferData *rb_data_new);
 int shutting_down();
 void print_and_log(int level, const char *format, ...);
 void process_client_data(const char *data, ssize_t data_length);
-int process_recieved_data(enum ThreadState *t_state, int c_fd, char* r_buffer, size_t* r_buffer_size, size_t* r_buffer_allocated_size, char* r_buffer_temp, size_t r_bytes);
 int open_file_for_read_write();
 int write_to_file(int fd, const char *data, ssize_t data_length);
 int read_from_file(int fd, char *buffer, size_t buffer_size);
@@ -115,6 +131,8 @@ static void signal_handler(int signal_number);
 int join_closed_thread();
 bool all_threads_closed();
 int create_thread(int c_fd, char* ip_string, size_t ip_string_size);
-void thread_cleanup(int c_fd, char* r_buffer);
+void thread_cleanup(struct BufferData* rb_data, struct BufferData* rb_data_buffer);
 int release_file_mutex();
 int get_file_mutex();
+
+#endif
