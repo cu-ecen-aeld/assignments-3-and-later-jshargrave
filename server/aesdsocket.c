@@ -34,30 +34,274 @@ int main(int argc, char *argv[])
 int main_loop()
 {
     // Main loop
-    current_state = WaitingForClient;
+    int client_fd;
+    char ip_string[INET_ADDRSTRLEN];
+
+    current_state = Waiting;
+    bool caught_signal_prev = false;
+
+    // Time
+    struct timespec tp;
+    clock_gettime(CLOCK_MONOTONIC, &tp);
+    time_t next_timestamp = tp.tv_sec + 10;
+
     while (keep_looping)
     {
-        if (caught_signal && current_state == WaitingForClient)
+        // Print when we catch the signal
+        if (caught_signal && !caught_signal_prev)
         {
-           print_and_log(LOG_INFO, "%s\n", "Caught signal, exiting");
-           keep_looping = false;
-           continue;
+            caught_signal_prev = caught_signal;
+            print_and_log(LOG_INFO, "%s\n", "Caught signal, exiting");
         }
-        else if (current_state == WaitingForClient)
+
+        // Write time stamp if 10 sec passed
+        clock_gettime(CLOCK_MONOTONIC, &tp);
+        if (tp.tv_sec >= next_timestamp)
         {
-            waiting_for_client();
+            next_timestamp = tp.tv_sec + 10;
+            write_time_stamp();
         }
-        else if (current_state == RecievingData)
+
+        if (current_state == Waiting)
         {
-            recieving_data();
+            // Join any closed threads
+            join_threads();
+
+            // If signal caught and all threads closed exit main loop
+            if (all_threads_closed() && caught_signal)
+            {
+                keep_looping = false;
+            }
+
+            // Don't accept any more connections once the signal is caught
+            if (!caught_signal)
+            {
+                check_for_client_connection(&client_fd, &ip_string[0], sizeof(ip_string));
+            }
         }
-        else if (current_state == SendingData)
+        else if (current_state == CreatingThread)
         {
-            sending_data();
+            create_thread(client_fd, &ip_string[0], sizeof(ip_string));
+            current_state = Waiting;
         }
     }
     return 0;
 }
+
+int write_time_stamp()
+{
+    print_and_log(LOG_INFO, "Writing timestamp!\n");
+
+    // Get the local time and store in char array
+    time_t epoch_time;
+    struct tm *local_time;
+    char time_buffer[TIME_BUFFER_SIZE];
+    time(&epoch_time);
+    local_time = localtime(&epoch_time);
+    size_t strftime_rv = strftime(&time_buffer[0], sizeof(time_buffer), TIME_FORMAT, local_time);
+    if (strftime_rv == 0)
+    {
+        print_and_log(LOG_ERR, "Error: Failed to format the time!\n");
+        return -1;
+    }
+
+    // Get mutex
+    if (get_file_mutex() == -1)
+    {
+        print_and_log(LOG_ERR, "Error: Failed to get mutex!\n");
+        return -1;
+    }
+
+    int f_fd = open_file_for_read_write();
+    if (f_fd == -1)
+    {
+        print_and_log(LOG_ERR, "Error: Failed to open file '%s'!\n", FILE_PATH);
+        release_file_mutex();
+        return -1;
+    }
+
+
+
+    if (write_to_file(f_fd, time_buffer, strlen(time_buffer)) == -1)
+    {
+        print_and_log(LOG_ERR, "Error: Failed to write to file '%s'!\n", FILE_PATH);
+        close(f_fd);
+        release_file_mutex();
+        return -1;
+    }
+
+    if (close(f_fd) == -1)
+    {
+        print_and_log(LOG_ERR, "Error: Failed to close file '%s'!\n", FILE_PATH);
+        release_file_mutex();
+        return -1;
+    }
+
+    if (release_file_mutex() == -1)
+    {
+        print_and_log(LOG_ERR, "Error: Failed to release mutex!\n");
+        return -1;
+    }
+
+    return 0;
+}
+
+
+void* main_loop_thread(void* thread_param)
+{
+    struct ThreadData *thread_data_ptr = (struct ThreadData *)thread_param;
+
+    bool keep_looping_thread = true;
+
+    struct BufferData *receive_buffer_data = malloc(sizeof(struct BufferData));
+    receive_buffer_data->buffer = NULL;
+    receive_buffer_data->allocated = 0;
+    receive_buffer_data->size = 0;
+
+    struct BufferData *receive_buffer_data_new = malloc(sizeof(struct BufferData));
+    receive_buffer_data_new->buffer = malloc(RECV_BUFFER_TEMP_SIZE);
+    receive_buffer_data_new->allocated = RECV_BUFFER_TEMP_SIZE;
+    receive_buffer_data_new->size = 0;
+
+    while(keep_looping_thread)
+    {
+        // Exit all threads if signal received
+        if (caught_signal)
+        {
+            keep_looping_thread = false;
+        }
+
+        if (thread_data_ptr->thread_state == WaitingForData)
+        {
+            if (waiting_for_data(thread_data_ptr, receive_buffer_data, receive_buffer_data_new) == -1)
+            {
+                thread_data_ptr->thread_state = ClosedConnection;
+            }
+        }
+        else if (thread_data_ptr->thread_state == ProcessingData)
+        {
+            if (process_received_data(thread_data_ptr, receive_buffer_data, receive_buffer_data_new) == -1)
+            {
+                thread_data_ptr->thread_state = ClosedConnection;
+            }
+        }
+        else if (thread_data_ptr->thread_state == SendingData)
+        {
+            if (sending_data(thread_data_ptr, receive_buffer_data, receive_buffer_data_new) == -1)
+            {
+                thread_data_ptr->thread_state = ClosedConnection;
+            }
+        }
+        else if (thread_data_ptr->thread_state == ClosedConnection)
+        {
+            keep_looping_thread = false;
+        }
+    }
+
+    // Cleanup local thread variables
+    thread_cleanup(receive_buffer_data, receive_buffer_data_new);
+
+    return thread_data_ptr;
+}
+
+int create_thread(int c_fd, char* ip_string, size_t ip_string_size)
+{
+    // Setup linked list and thread data values
+    struct LinkedListItem *linked_list_item_ptr = NULL;
+    struct ThreadData * thread_data_ptr = NULL;
+
+    linked_list_item_ptr = malloc(sizeof(struct LinkedListItem));
+    if (linked_list_item_ptr == NULL)
+    {
+        // Memory not allocated
+        print_and_log(LOG_ERR, "Error: Failed to allocate memory for linked list item!\n");
+        return -1;
+    }
+    
+    void* memcpy_rv = memcpy(linked_list_item_ptr->client_ip_string, ip_string, ip_string_size);
+    if (memcpy_rv == NULL)
+    {
+        // Memory not allocated
+        print_and_log(LOG_ERR, "Error: Failed to copy ip string into linked list item!\n");
+        return -1;
+    }
+
+    thread_data_ptr = malloc(sizeof(struct ThreadData));
+    if (thread_data_ptr == NULL)
+    {
+        // Memory not allocated
+        print_and_log(LOG_ERR, "Error: Failed to allocate memory for thread data!\n");
+        return -1;
+    }
+
+    thread_data_ptr->client_fd = c_fd;
+    thread_data_ptr->thread_state = WaitingForData;
+
+
+    int pthread_create_rv = pthread_create(&linked_list_item_ptr->thread_id, NULL, main_loop_thread, thread_data_ptr);
+    if (pthread_create_rv != 0)
+    {
+        print_and_log(LOG_ERR, "%s\n", "Error: Failed to create thread!\n");
+        return -1;
+    }
+
+    SLIST_INSERT_HEAD(&linked_list, linked_list_item_ptr, LinkedListItems);
+
+    return 0;
+}
+
+int join_threads()
+{
+    struct LinkedListItem* linked_list_item_ptr = NULL;
+    struct LinkedListItem* linked_list_item_ptr_temp = NULL;
+    struct ThreadData *thread_data_ptr;
+    void* thread_return = NULL;
+
+    SLIST_FOREACH_SAFE(linked_list_item_ptr, &linked_list, LinkedListItems, linked_list_item_ptr_temp)
+    {
+        int join_rv = pthread_tryjoin_np(linked_list_item_ptr->thread_id, &thread_return);
+        
+        // Check if thread joined
+        if (join_rv == 0)
+        {
+            print_and_log(LOG_INFO, "Closed connection from %s\n", linked_list_item_ptr->client_ip_string);
+            
+            thread_data_ptr = (struct ThreadData *)thread_return;
+            close(thread_data_ptr->client_fd);
+
+            // Remove Linked List item
+            SLIST_REMOVE(&linked_list, linked_list_item_ptr, LinkedListItem, LinkedListItems);
+
+            // Cleanup
+            if (linked_list_item_ptr != NULL)
+            {
+                free(linked_list_item_ptr);
+                linked_list_item_ptr = NULL;
+            }
+
+            if (thread_data_ptr != NULL)
+            {
+                free(thread_data_ptr);
+                thread_data_ptr = NULL;
+            }
+        }
+    }
+
+    return 0;
+}
+
+bool all_threads_closed()
+{
+    if (SLIST_EMPTY(&linked_list))
+    {
+        return true;
+    }
+    else
+    {
+        return false;
+    }
+}
+
 
 int main_loop_fork()
 {
@@ -125,6 +369,12 @@ int startup()
 {
     current_state = Startup;
 
+    // Linked List init
+    SLIST_INIT(&linked_list);
+
+    // Mutex
+    pthread_mutex_init(&file_mutex, NULL);
+
     // Setup logger
     openlog(NULL, LOG_ODELAY, LOG_USER);
     print_and_log(LOG_INFO, "%s\n", "AESD Socket Starting!");
@@ -184,129 +434,176 @@ int startup()
         return -1;
     }
 
+    // Change socket to NonBlocking
+    int flags = fcntl(socket_fd, F_GETFL, 0);
+    if (flags == -1)
+    {
+        print_and_log(LOG_ERR, "%s\n", "Error: Failed to get socket flags!");
+        return -1;
+    }
+
+    if (fcntl(socket_fd, F_SETFL, flags | O_NONBLOCK) == -1)
+    {
+        print_and_log(LOG_ERR, "%s\n", "Error: Failed to set socket non-blocking!");
+        return -1;
+    }
+
     return 0;
 }
 
-int waiting_for_client()
+int check_for_client_connection(int* c_fd, char* ip_string, int ip_string_size)
 {
     client_address_len = sizeof(client_address);
-    client_fd = accept(socket_fd, (struct sockaddr *)&client_address, &client_address_len);
-    if (client_fd == -1)
+    *c_fd = accept(socket_fd, (struct sockaddr *)&client_address, &client_address_len);
+    if (*c_fd == -1)
     {
         // If signal triggerd this fail don't print this error
         if (errno == EINTR && caught_signal)
         {
             return 0;
         }
-        print_and_log(LOG_ERR, "%s\n", "Error: Failed to accept client connection!");
         return -1;
     }
 
     // Print client IP address
-    get_client_ip_address(client_address, ip_string, sizeof(ip_string));
+    get_client_ip_address(client_address, ip_string, ip_string_size);
     print_and_log(LOG_INFO, "Accepted connection from %s\n", ip_string);
 
-    current_state = RecievingData;
+    current_state = CreatingThread;
     return 0;
 }
 
-int recieving_data()
+int waiting_for_data(struct ThreadData *t_data, struct BufferData *rb_data, struct BufferData *rb_data_new)
 {
-    char temp[RECV_BUFFER_SIZE];
-    ssize_t recv_bytes = recv(client_fd, temp, sizeof(temp), 0);
+    // Get data from client
+    ssize_t received_bytes = recv(t_data->client_fd, rb_data_new->buffer, rb_data_new->allocated, 0);
 
-    if (recv_bytes == -1)
+    if (received_bytes == -1)
     {
         print_and_log(LOG_ERR, "%s\n", "Error: Failed to receive data from client!");
         return -1;
     }
 
     // Client closed connection
-    if (recv_bytes == 0)
+    if (received_bytes == 0)
     {
-        print_and_log(LOG_INFO, "Closed connection from %s\n", ip_string);
-        close(client_fd);
-        current_state = WaitingForClient;
+        t_data->thread_state = ClosedConnection;
         return 0;
     }
 
+    rb_data_new->size = received_bytes;
+
     // Grow buffer if needed
-    while (recv_allocated_size < recv_buffer_size + recv_bytes + 1)
+    while (rb_data->allocated < rb_data->size + rb_data_new->size)
     {
-        recv_allocated_size += RECV_BUFFER_SIZE;
-        char* recv_buffer_temp = realloc(recv_buffer, recv_allocated_size);
-        if (!recv_buffer_temp)
+        rb_data->allocated += RECV_BUFFER_GROW_SIZE;
+        char* r_buffer_new = realloc(rb_data->buffer, rb_data->allocated);
+        if (!r_buffer_new)
         {
-            keep_looping = false;
             return -1;
         }
 
-        recv_buffer = recv_buffer_temp;
+        rb_data->buffer = r_buffer_new;
     }
 
-    // Copy data to buffer
-    memcpy(recv_buffer + recv_buffer_size, temp, recv_bytes);
-
-    // If newline recieved, write to file, and shift everything forward in the buffer
-    int count = 0;
-    bool found_packet_end = false;
-    size_t new_packet_start = 0;
-    size_t remaining = 0;
-    while (count < recv_bytes)
-    {
-        if (recv_buffer[recv_buffer_size + count] == PACKET_ENDING)
-        {
-            found_packet_end = true;
-            write_to_file(FILE_PATH, recv_buffer, recv_buffer_size + count + 1);
-
-            new_packet_start = recv_buffer_size + count + 1;
-            remaining  = (size_t)recv_bytes - (count + 1);
-            memmove(recv_buffer, recv_buffer + new_packet_start, remaining);
-            break;
-        }
-        count++;
-    }
-
-    if (found_packet_end)
-    {
-        recv_buffer_size = remaining;
-        current_state = SendingData;
-    }
-    else
-    {
-        recv_buffer_size += recv_bytes;
-    }
-
-    recv_buffer[recv_buffer_size] = '\0'; // Null terminate for printouts
+    // Ready to proccess data
+    t_data->thread_state = ProcessingData;
     return 0;
 }
 
-int sending_data()
+size_t process_received_data(struct ThreadData *t_data, struct BufferData *rb_data, struct BufferData *rb_data_new)
 {
-    // Open the file for reading
-    int fd = open(FILE_PATH, O_RDONLY);
-    if (fd == -1)
+    size_t index = 0;
+    bool found_end = false;
+    while (index < rb_data_new->size)
     {
-        print_and_log(LOG_ERR, "Error: Failed to open file '%s' for reading!\n", FILE_PATH);
+        // If we receive a complete packet then break out of loop
+        if (rb_data_new->buffer[index] == PACKET_ENDING)
+        {
+            found_end = true;
+            break;
+        }
+        index++;
+    }
+
+    // If we found end byte then transition to sending data, otherwise wait for additional data
+    if (found_end)
+    {
+        // Copy data up to new packet into main buffer
+        memcpy(rb_data->buffer + rb_data->size, rb_data_new->buffer, index + 1);
+        rb_data->size += index + 1;
+
+        // Re-size new buffer data
+        memmove(rb_data_new->buffer, rb_data_new->buffer + (index + 1), rb_data_new->size - (index + 1));
+        rb_data_new->size -= index + 1;
+
+        // Send data
+        t_data->thread_state = SendingData;
+    }
+    else
+    {
+        // Copy all data into main buffer
+        memcpy(rb_data->buffer + rb_data->size, rb_data_new->buffer, rb_data_new->size);
+        rb_data->size += rb_data_new->size;
+
+        // Resize new buffer data
+        rb_data_new->size = 0;
+
+        // Wait for more data
+        t_data->thread_state = WaitingForData;
+    }
+
+    return 0;
+}
+
+int sending_data(struct ThreadData *t_data, struct BufferData *rb_data, struct BufferData *rb_data_temp)
+{
+    // Get mutex
+    if (get_file_mutex() == -1)
+    {
         return -1;
     }
 
-    // Read the data from the file
+    int f_fd = open_file_for_read_write();
+    if (f_fd == -1)
+    {
+        print_and_log(LOG_ERR, "Error: Failed to open file '%s'!\n", FILE_PATH);
+        release_file_mutex();
+        return -1;
+    }
+
+    if (write_to_file(f_fd, rb_data->buffer, rb_data->size) == -1)
+    {
+        print_and_log(LOG_ERR, "Error: Failed to write to file '%s'!\n", FILE_PATH);
+        close(f_fd);
+        release_file_mutex();
+        return -1;
+    }
+
+    // Reset receive buffer
+    rb_data->size = 0;
+
+    // Reset file to start
+    lseek(f_fd, 0, SEEK_SET);
+
+    // Read all bytes from file and send back to client
     char send_buffer[SEND_BUFFER_SIZE];
     ssize_t bytes_read;
     ssize_t sent_bytes;
     ssize_t total_bytes_sent;
-    while ((bytes_read = read(fd, send_buffer, sizeof(send_buffer))) > 0)
+    while ((bytes_read = read_from_file(f_fd, send_buffer, sizeof(send_buffer))) > 0)
     {
         total_bytes_sent = 0;
 
+        // Send loop
         while (total_bytes_sent < bytes_read)
         {
-            sent_bytes = send(client_fd, send_buffer + total_bytes_sent, bytes_read - total_bytes_sent, 0);
+            sent_bytes = send(t_data->client_fd, send_buffer + total_bytes_sent, bytes_read - total_bytes_sent, 0);
             if (sent_bytes == -1)
             {
                 print_and_log(LOG_ERR, "%s\n", "Error: Failed to send data to client!");
-                close(fd);
+                close(f_fd);
+                release_file_mutex();
                 return -1;
             }
             total_bytes_sent += sent_bytes;
@@ -316,14 +613,99 @@ int sending_data()
     if (bytes_read == -1)
     {
         print_and_log(LOG_ERR, "Error: Failed to read from file '%s'!\n", FILE_PATH);
-        close(fd);
+        close(f_fd);
+        release_file_mutex();
         return -1;
     }
 
-    close(fd);
-    current_state = RecievingData;
+    if (close(f_fd) == -1)
+    {
+        print_and_log(LOG_ERR, "Error: Failed to close file '%s'!\n", FILE_PATH);
+        release_file_mutex();
+        return -1;
+    }
+
+    if (release_file_mutex() == -1)
+    {
+        print_and_log(LOG_ERR, "Error: Failed to release mutex!\n");
+        return -1;
+    }
+
+    // Transition back to processing if there is still more data to process
+    // Otherwise wait for more data from client
+    if (rb_data_temp->size > 0)
+    {
+        t_data->thread_state = ProcessingData;
+    }
+    else
+    {
+        t_data->thread_state = WaitingForData;
+    }
 
     return 0;
+}
+
+int get_file_mutex()
+{
+    // Get mutex
+    int rc = pthread_mutex_lock(&file_mutex);
+    if (rc != 0)
+    {
+        print_and_log(LOG_ERR, "Error: Failed to get file mutex!\n");
+        return -1;
+    }
+    return 0;
+}
+
+int release_file_mutex()
+{
+    // Release mutex
+    int rc = pthread_mutex_unlock(&file_mutex);
+    if (rc != 0)
+    {
+        print_and_log(LOG_ERR, "Error: Failed to release file mutex!\n");
+        return -1;
+    }
+    return 0;
+}
+
+int open_file_for_read_write()
+{
+    // Open the file for writing
+    int fd = open(FILE_PATH, O_RDWR | O_CREAT | O_APPEND, 0644);
+    if (fd == -1)
+    {
+        print_and_log(LOG_ERR, "Error: Failed to open file '%s' for writing!\n", FILE_PATH);
+        return -1;
+    }
+
+    return fd;
+}
+
+void thread_cleanup(struct BufferData* rb_data, struct BufferData* rb_data_new)
+{
+    // Free buffers
+    if (rb_data)
+    {
+        if (rb_data->buffer)
+        {
+            free(rb_data->buffer);
+            rb_data->buffer = NULL;
+        }
+        free(rb_data);
+        rb_data = NULL;
+    }
+
+    if (rb_data_new)
+    {
+        if (rb_data_new->buffer)
+        {
+            free(rb_data_new->buffer);
+            rb_data_new->buffer = NULL;
+        }
+        free(rb_data_new);
+        rb_data_new = NULL;
+    }
 }
 
 int shutting_down()
@@ -331,13 +713,6 @@ int shutting_down()
     current_state = ShuttingDown;
 
     print_and_log(LOG_INFO, "%s\n", "AESD Socket Stopping!");
-
-    // Free buffers
-    if (recv_buffer)
-    {
-        free(recv_buffer);
-        recv_buffer = NULL;
-    }
 
     if (res)
     {
@@ -350,12 +725,6 @@ int shutting_down()
     {
         close(socket_fd);
         socket_fd = -1;
-    }
-
-    if (client_fd != -1)
-    {
-        close(client_fd);
-        client_fd = -1;
     }
 
     // Delete tmp file
@@ -383,71 +752,42 @@ void print_and_log(int level, const char *format, ...)
     va_end(args);
 }
 
-void process_client_data(const char *data, ssize_t data_length)
+int write_to_file(int fd, const char *data, ssize_t data_length)
 {
-    // Process the received data here
-    // For example, you can print it to the console or log it
-    printf("Received data: %.*s\n", (int)data_length, data);
-
-    for(int i = 0; i < data_length; i++)
-    {
-        if (data[i] == '\n')
-        {
-            printf("Newline character found at index %d\n", i);
-        }
-    }
-}
-
-int write_to_file(const char *filename, const char *data, ssize_t data_length)
-{
-    // Open the file for writing
-    int fd = open(filename, O_WRONLY | O_CREAT | O_APPEND, 0644);
-    if (fd == -1)
-    {
-        print_and_log(LOG_ERR, "Error: Failed to open file '%s' for writing!\n", filename);
-        return -1;
-    }
-
     // Write the data to the file
     ssize_t bytes_written = write(fd, data, data_length);
     if (bytes_written == -1)
     {
-        print_and_log(LOG_ERR, "Error: Failed to write to file '%s'!\n", filename);
-        close(fd);
+        print_and_log(LOG_ERR, "Error: Failed to write to file!\n");
+        return -1;
+    }
+
+    if (bytes_written != data_length)
+    {
+        print_and_log(LOG_ERR, "Error: Did not write all bytes to file!\n");
         return -1;
     }
 
     // Close the file descriptor
-    close(fd);
     return bytes_written;
 }
 
-int read_from_file(const char *filename, char *buffer, size_t buffer_size)
+int read_from_file(int fd, char *buffer, size_t buffer_size)
 {
-    // Open the file for reading
-    int fd = open(filename, O_RDONLY);
-    if (fd == -1)
-    {
-        print_and_log(LOG_ERR, "Error: Failed to open file '%s' for reading!\n", filename);
-        return -1;
-    }
-
     // Read the data from the file
     ssize_t bytes_read = read(fd, buffer, buffer_size - 1); // Leave space for null terminator
     if (bytes_read == -1)
     {
-        print_and_log(LOG_ERR, "Error: Failed to read from file '%s'!\n", filename);
-        close(fd);
+        print_and_log(LOG_ERR, "Error: Failed to read from file!\n");
         return -1;
     }
     else
     {
         buffer[bytes_read] = '\0'; // Null-terminate the buffer
-        print_and_log(LOG_INFO, "Successfully read %zd bytes from file '%s'\n", bytes_read, filename);
+        print_and_log(LOG_INFO, "Successfully read %zd bytes from file!\n", bytes_read);
     }
 
     // Close the file descriptor
-    close(fd);
     return bytes_read;
 }
 

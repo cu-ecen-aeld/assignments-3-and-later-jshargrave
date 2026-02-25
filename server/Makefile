@@ -1,17 +1,21 @@
 # Author: Joseph Hargrave
 # Date: 2/15/2026
 
-CC=gcc
-FLAGS=-Wall -Werror
+CC ?= gcc
+CFLAGS ?= -Wall -Werror
+LDFLAGS ?=
+
+TARGET := aesdsocket
+OBJS := aesdsocket.o
 
 all: aesdsocket
 
 aesdsocket: aesdsocket.o
 	@echo 'Building aesdsocket!'
-	@$(CROSS_COMPILE)$(CC) -o aesdsocket aesdsocket.o
+	@$(CC) -o aesdsocket aesdsocket.o $(LDFLAGS)
 
 aesdsocket.o : aesdsocket.c aesdsocket.h
-	@$(CROSS_COMPILE)$(CC) -c aesdsocket.c $(FLAGS)
+	@$(CC) -c aesdsocket.c $(FLAGS)
 
 clean : 
 	@echo 'Cleaning!'
