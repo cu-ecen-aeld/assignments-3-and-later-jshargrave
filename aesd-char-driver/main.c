@@ -58,23 +58,20 @@ ssize_t aesd_read(struct file *filp, char __user *buf, size_t count, loff_t *f_p
 {
     PDEBUG("read %zu bytes with offset %lld",count,*f_pos);
 
+    // TODO: Implement locking
+
     struct aesd_dev *aesd_dev_ptr = (struct aesd_dev *)filp->private_data;
     struct aesd_buffer_entry *read_pointer = NULL;
-    size_t char_returned;
+    size_t char_returned = 0;
     size_t bytes_read = 0;
-    size_t bytes_to_copy;
+    size_t bytes_to_copy = 0;
+    size_t entry_bytes = 0;
     unsigned long bytes_not_copied;
-
-    if (!access_ok(buf, count))
-    {
-        PDEBUG("Error: Memory access (%p) to the user space is not accessible!\n\r", buf);
-        return -1;
-    }
 
     // Read the contents from the circular buffer
     while(bytes_read < count)
     {
-        read_pointer = aesd_circular_buffer_find_entry_offset_for_fpos(aesd_dev_ptr->buffer, (size_t)(f_pos + bytes_read), &char_returned);
+        read_pointer = aesd_circular_buffer_find_entry_offset_for_fpos(&aesd_dev_ptr->buffer, (size_t)(*f_pos + bytes_read), &char_returned);
         
         // If there are no more entries
         if (read_pointer == NULL)
@@ -82,23 +79,26 @@ ssize_t aesd_read(struct file *filp, char __user *buf, size_t count, loff_t *f_p
             break;
         }
 
+        // Number of bytes in entry starting from offset
+        entry_bytes = read_pointer->size - char_returned;
+
         // We can read the amount requested in this loop
-        if (read_pointer->size <= count - bytes_read)
+        if (entry_bytes >= count - bytes_read)
         {
             bytes_to_copy = count - bytes_read;
         }
         // Read as many bytes that are in the entry
         else
         {
-            bytes_to_copy = read_pointer->size;
+            bytes_to_copy = entry_bytes;
         }
 
         // Copy memory from user space to kernal space
-        bytes_not_copied = copy_to_user(buf + bytes_read, read_pointer->buffptr, bytes_to_copy);
+        bytes_not_copied = copy_to_user(buf + bytes_read, read_pointer->buffptr + char_returned, bytes_to_copy);
         if (bytes_not_copied > 0)
         {
-            PDEBUG("Error: failed to copy bytes (%ld/%ld) to the user space!\n\r", bytes_not_copied, count);
-            return -ENOMEM;
+            PDEBUG("Error: failed to copy bytes (%lu/%zu) to the user space!\n\r", bytes_not_copied, count);
+            return -EFAULT;
         }
 
         // Update bytes read count
@@ -119,73 +119,60 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count, loff
 
     // TODO: implement lock
 
-    char* r_buffer_new = NULL;
-    struct aesd_buffer_entry *overwritten_entry = NULL;
-
-    if (!access_ok(buf, count))
-    {
-        PDEBUG("Error: Memory access (%p) from the user space is not accessible!\n\r", buf);
-        return -1;
-    }
-
-    // Allocate memory for entry_temp
-    if (aesd_dev_ptr->entry_temp == NULL)
-    {
-        aesd_dev_ptr->entry_temp = ALLOC(sizeof(struct aesd_buffer_entry), GFP_KERNEL);
-
-        // Failed to allocate memory
-        if (aesd_dev_ptr->entry_temp == NULL)
-        {
-            PDEBUG("Error: Memory allocation failed for kernal memory entry!\n\r");
-            return -ENOMEM;
-        }
-
-        aesd_dev_ptr->entry_temp->buffptr = NULL;
-        aesd_dev_ptr->entry_temp->size = 0;
-    }
+    char* new_buffer = NULL;
+    char* overwritten_entry = NULL;
 
     // Allocate memory for char buffer
-    if (aesd_dev_ptr->entry_temp->buffptr == NULL)
+    if (aesd_dev_ptr->entry_temp.buffptr == NULL)
     {
-        r_buffer_new = ALLOC(count, GFP_KERNEL);
+        new_buffer = ALLOC(count, GFP_KERNEL);
     }
     else
     {
-        r_buffer_new = ALLOC(aesd_dev_ptr->entry_temp->size + count, GFP_KERNEL);
+        new_buffer = ALLOC(aesd_dev_ptr->entry_temp.size + count, GFP_KERNEL);
     }
 
     // Failed to allocate memory
-    if (!r_buffer_new)
+    if (!new_buffer)
     {
         PDEBUG("Error: Memory allocation failed for kernal memory buffer!\n\r");
-        FREE(aesd_dev_ptr->entry_temp->buffptr);
-        FREE(aesd_dev_ptr->entry_temp);
         return -ENOMEM;
     }
     
-    // Free old buffer and set new char buffer pointer
-    FREE(aesd_dev_ptr->entry_temp->buffptr);
-    aesd_dev_ptr->entry_temp->buffptr = r_buffer_new;
-
-    // Copy memory from user space to kernal space
-    unsigned long bytes_not_copied = copy_from_user((void*)(aesd_dev_ptr->entry_temp->buffptr + aesd_dev_ptr->entry_temp->size), buf, count);
-    if (bytes_not_copied > 0)
+    // Copy old buffer if there is content already in entry_temp
+    if (aesd_dev_ptr->entry_temp.buffptr != NULL)
     {
-        PDEBUG("Error: failed to copy bytes (%ld/%ld) from the user space!\n\r", bytes_not_copied, count);
-        FREE(aesd_dev_ptr->entry_temp->buffptr);
-        FREE(aesd_dev_ptr->entry_temp);
-        return -ENOMEM;
+        memcpy(new_buffer, aesd_dev_ptr->entry_temp.buffptr, aesd_dev_ptr->entry_temp.size);
     }
 
+    // Copy memory from user space to kernal space
+    unsigned long bytes_not_copied = copy_from_user((void*)(new_buffer + aesd_dev_ptr->entry_temp.size), buf, count);
+    if (bytes_not_copied > 0)
+    {
+        PDEBUG("Error: failed to copy bytes (%lu/%zu) from the user space!\n\r", bytes_not_copied, count);
+        FREE(new_buffer);
+        return -EFAULT;
+    }
+
+    // Free old buffer
+    if (aesd_dev_ptr->entry_temp.buffptr != NULL)
+    {
+        FREE(aesd_dev_ptr->entry_temp.buffptr);
+    }
+
+    // Set to the new buffer
+    aesd_dev_ptr->entry_temp.buffptr = new_buffer;
+
     // Set entry size post copy
-    aesd_dev_ptr->entry_temp->size += count;
+    aesd_dev_ptr->entry_temp.size += count;
 
     // Check if the entry is complete
-    if (aesd_dev_ptr->entry_temp->buffptr[aesd_dev_ptr->entry_temp->size] == END_WRITE_CHAR)
+    if (aesd_dev_ptr->entry_temp.buffptr[aesd_dev_ptr->entry_temp.size - 1] == END_WRITE_CHAR)
     {
         // Add entry
-        overwritten_entry = aesd_circular_buffer_add_entry(aesd_dev_ptr->buffer, aesd_dev_ptr->entry_temp);
-        aesd_dev_ptr->entry_temp = NULL;
+        overwritten_entry = aesd_circular_buffer_add_entry(&aesd_dev_ptr->buffer, &aesd_dev_ptr->entry_temp);
+        aesd_dev_ptr->entry_temp.buffptr = NULL;
+        aesd_dev_ptr->entry_temp.size = 0;
 
         // The write overwrote a entry so we need to free it
         if (overwritten_entry != NULL)
@@ -196,6 +183,7 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count, loff
     
     return count;
 }
+
 struct file_operations aesd_fops = {
     .owner =    THIS_MODULE,
     .read =     aesd_read,
@@ -233,21 +221,10 @@ int aesd_init_module(void)
     }
     memset(&aesd_device,0,sizeof(struct aesd_dev));
 
-    // Allocate memory for circular buffer
-    if (aesd_device.buffer == NULL)
-    {
-        aesd_device.buffer = ALLOC(sizeof(struct aesd_circular_buffer), GFP_KERNEL);
-
-        // Failed to allocate memory
-        if (aesd_device.buffer == NULL)
-        {
-            PDEBUG("Error: Memory allocation failed for kernal memory circular buffer!\n\r");
-            return -ENOMEM;
-        }
-    }
-
-    // Clear circular buffer entrys
-    aesd_circular_buffer_init(aesd_device.buffer);
+    // Reset Circular Buffer
+    aesd_circular_buffer_init(&aesd_device.buffer);
+    aesd_device.entry_temp.buffptr = NULL;
+    aesd_device.entry_temp.size = 0;
 
     result = aesd_setup_cdev(&aesd_device);
 
@@ -265,24 +242,16 @@ void aesd_cleanup_module(void)
 
     cdev_del(&aesd_device.cdev);
 
-    // De-allocate memory for circular buffer
-    if (aesd_device.buffer != NULL)
+    // De-allocate all the entrys in the buffer
+    while(!aesd_device.buffer.empty)
     {
-        // De-allocate all the entrys in the buffer
-        while(!aesd_device.buffer->empty)
-        {
-            FREE(aesd_circular_buffer_remove_entry(aesd_device.buffer));
-        }
-
-        // De-allocte the circular buffer and 
-        FREE(aesd_device.buffer);
+        FREE(aesd_circular_buffer_remove_entry(&aesd_device.buffer)->buffptr);
     }
 
-    // De-allocate memory for working entry
-    if (aesd_device.entry_temp != NULL)
-    {
-        FREE(aesd_device.entry_temp);
-    }
+    // Reset Circular Buffer
+    aesd_circular_buffer_init(&aesd_device.buffer);
+    aesd_device.entry_temp.buffptr = NULL;
+    aesd_device.entry_temp.size = 0;
 
     unregister_chrdev_region(devno, 1);
 }

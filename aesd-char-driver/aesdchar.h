@@ -13,9 +13,9 @@
 
 struct aesd_dev
 {
-     struct cdev cdev;                            // Char device structure
-     struct aesd_circular_buffer *buffer;          // Buffer
-     struct aesd_buffer_entry *entry_temp;         // Stores working entry until its complete
+     struct cdev cdev;                              // Char device structure
+     struct aesd_circular_buffer buffer;            // Buffer
+     struct aesd_buffer_entry entry_temp;           // Stores working entry until its complete
      //pthread_mutex_t write_mutex;                 // Write lock
 };
 
