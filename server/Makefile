@@ -3,7 +3,9 @@
 
 CC ?= gcc
 CFLAGS ?= -Wall -Werror
+EXTRA_CFLAGS ?=
 LDFLAGS ?=
+EXTRA_LDFLAGS ?=
 
 TARGET := aesdsocket
 OBJS := aesdsocket.o
@@ -12,10 +14,10 @@ all: aesdsocket
 
 aesdsocket: aesdsocket.o
 	@echo 'Building aesdsocket!'
-	@$(CC) -o aesdsocket aesdsocket.o $(LDFLAGS)
+	@$(CC) -o aesdsocket aesdsocket.o $(LDFLAGS) ${EXTRA_LDFLAGS}
 
 aesdsocket.o : aesdsocket.c aesdsocket.h
-	@$(CC) -c aesdsocket.c $(FLAGS)
+	@$(CC) -c aesdsocket.c $(CFLAGS) ${EXTRA_CFLAGS}
 
 clean : 
 	@echo 'Cleaning!'

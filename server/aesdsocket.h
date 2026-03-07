@@ -29,6 +29,8 @@
 
 #ifdef USE_AESD_CHAR_DEVICE
 #define FILE_PATH "/dev/aesdchar"
+#define DISABLE_LOCKING
+#define DISABLE_TIMESTAMP
 #else
 #define FILE_PATH "/var/tmp/aesdsocketdata"
 #endif
