@@ -238,19 +238,32 @@ void aesd_cleanup_module(void)
     cdev_del(&aesd_device.cdev);
 
     // De-allocate all the entrys in the buffer
+    struct aesd_buffer_entry* entry = NULL;
     while(!aesd_device.buffer.empty)
     {
-        FREE(aesd_circular_buffer_remove_entry(&aesd_device.buffer)->buffptr);
+        entry = aesd_circular_buffer_remove_entry(&aesd_device.buffer);
+        if (entry == NULL)
+        {
+            break;
+        }
+
+        if (entry->buffptr != NULL)
+        {
+            FREE(entry->buffptr);
+        }
     }
 
     // Reset Circular Buffer
     aesd_circular_buffer_init(&aesd_device.buffer);
 
     // Reset working entry
-    FREE(aesd_device.entry_temp.buffptr);
-    aesd_device.entry_temp.buffptr = NULL;
-    aesd_device.entry_temp.size = 0;
+    if (aesd_device.entry_temp.buffptr != NULL)
+    {
+        FREE(aesd_device.entry_temp.buffptr);
+        aesd_device.entry_temp.buffptr = NULL;
+    }
 
+    aesd_device.entry_temp.size = 0;
     unregister_chrdev_region(devno, 1);
 }
 
