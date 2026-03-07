@@ -11,6 +11,7 @@
 #include "aesdconfig.h"
 
 #ifdef __KERNEL__
+#include <linux/printk.h>
 #include <linux/types.h>
 #else
 #include <stddef.h> // size_t
