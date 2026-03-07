@@ -11,28 +11,7 @@
  *
  */
 
-#include <linux/module.h>
-#include <linux/init.h>
-#include <linux/printk.h>
-#include <linux/types.h>
-#include <linux/cdev.h>
-#include <linux/fs.h> // file_operations
-#include <linux/slab.h>
 #include "aesdchar.h"
-
-int aesd_major =   0; // use dynamic major
-int aesd_minor =   0;
-
-MODULE_AUTHOR("Joseph Hargrave");
-struct aesd_dev aesd_device;
-
-int aesd_open(struct inode *inode, struct file *filp);
-int aesd_release(struct inode *inode, struct file *filp);
-ssize_t aesd_read(struct file *filp, char __user *buf, size_t count, loff_t *f_pos);
-ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count, loff_t *f_pos);
-static int aesd_setup_cdev(struct aesd_dev *dev);
-int aesd_init_module(void);
-void aesd_cleanup_module(void);
 
 int aesd_open(struct inode *inode, struct file *filp)
 {
@@ -58,15 +37,21 @@ ssize_t aesd_read(struct file *filp, char __user *buf, size_t count, loff_t *f_p
 {
     PDEBUG("read %zu bytes with offset %lld",count,*f_pos);
 
-    // TODO: Implement locking
-
-    struct aesd_dev *aesd_dev_ptr = (struct aesd_dev *)filp->private_data;
+    struct aesd_dev *aesd_dev_ptr = filp->private_data;
     struct aesd_buffer_entry *read_pointer = NULL;
     size_t char_returned = 0;
     size_t bytes_read = 0;
     size_t bytes_to_copy = 0;
     size_t entry_bytes = 0;
     unsigned long bytes_not_copied;
+
+    // Get lock
+    int get_lock_rv = get_lock(&aesd_dev_ptr->buffer_lock);
+    if (get_lock_rv != 0)
+    {
+        PDEBUG("Error: failed to get lock!\n\r");
+        return -1;
+    }
 
     // Read the contents from the circular buffer
     while(bytes_read < count)
@@ -93,11 +78,12 @@ ssize_t aesd_read(struct file *filp, char __user *buf, size_t count, loff_t *f_p
             bytes_to_copy = entry_bytes;
         }
 
-        // Copy memory from user space to kernal space
+        // Copy memory from kernal space to user space
         bytes_not_copied = copy_to_user(buf + bytes_read, read_pointer->buffptr + char_returned, bytes_to_copy);
         if (bytes_not_copied > 0)
         {
             PDEBUG("Error: failed to copy bytes (%lu/%zu) to the user space!\n\r", bytes_not_copied, count);
+            release_lock(&aesd_dev_ptr->buffer_lock);
             return -EFAULT;
         }
 
@@ -107,6 +93,9 @@ ssize_t aesd_read(struct file *filp, char __user *buf, size_t count, loff_t *f_p
 
     // Update the offset
     *f_pos += bytes_read;
+
+    // Release lock
+    release_lock(&aesd_dev_ptr->buffer_lock);
     
     // Return bytes read
     return bytes_read;
@@ -115,12 +104,20 @@ ssize_t aesd_read(struct file *filp, char __user *buf, size_t count, loff_t *f_p
 ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count, loff_t *f_pos)
 {
     PDEBUG("write %zu bytes with offset %lld",count,*f_pos);
-    struct aesd_dev *aesd_dev_ptr = (struct aesd_dev *)filp->private_data;
 
-    // TODO: implement lock
-
+    struct aesd_dev *aesd_dev_ptr = filp->private_data;
     char* new_buffer = NULL;
     char* overwritten_entry = NULL;
+
+    // Get lock
+    int get_lock_rv = get_lock(&aesd_dev_ptr->buffer_lock);
+    if (get_lock_rv != 0)
+    {
+        PDEBUG("Error: failed to get lock!\n\r");
+        return -1;
+    }
+
+
 
     // Allocate memory for char buffer
     if (aesd_dev_ptr->entry_temp.buffptr == NULL)
@@ -136,6 +133,7 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count, loff
     if (!new_buffer)
     {
         PDEBUG("Error: Memory allocation failed for kernal memory buffer!\n\r");
+        release_lock(&aesd_dev_ptr->buffer_lock);
         return -ENOMEM;
     }
     
@@ -150,6 +148,7 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count, loff
     if (bytes_not_copied > 0)
     {
         PDEBUG("Error: failed to copy bytes (%lu/%zu) from the user space!\n\r", bytes_not_copied, count);
+        release_lock(&aesd_dev_ptr->buffer_lock);
         FREE(new_buffer);
         return -EFAULT;
     }
@@ -180,6 +179,9 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count, loff
             FREE(overwritten_entry);
         }
     }
+
+    // Release lock
+    release_lock(&aesd_dev_ptr->buffer_lock);
     
     return count;
 }
@@ -226,6 +228,9 @@ int aesd_init_module(void)
     aesd_device.entry_temp.buffptr = NULL;
     aesd_device.entry_temp.size = 0;
 
+    // Mutex init
+    mutex_init(&aesd_device.buffer_lock);
+
     result = aesd_setup_cdev(&aesd_device);
 
     if( result ) {
@@ -256,6 +261,24 @@ void aesd_cleanup_module(void)
     unregister_chrdev_region(devno, 1);
 }
 
+
+int get_lock(struct mutex* m)
+{
+    // Get lock
+    int return_value = mutex_lock_interruptible(m);
+    if (return_value)
+    {
+        return -ERESTARTSYS;
+    }
+    return 0;
+}
+
+int release_lock(struct mutex* m)
+{
+    // Release lock
+    mutex_unlock(m);
+    return 0;
+}
 
 
 module_init(aesd_init_module);
