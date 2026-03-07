@@ -40,6 +40,8 @@ int aesd_open(struct inode *inode, struct file *filp)
     /**
      * TODO: handle open
      */
+
+    inode->i_cdev;
     return 0;
 }
 
@@ -54,17 +56,66 @@ int aesd_release(struct inode *inode, struct file *filp)
 
 ssize_t aesd_read(struct file *filp, char __user *buf, size_t count, loff_t *f_pos)
 {
-    ssize_t retval = 0;
     PDEBUG("read %zu bytes with offset %lld",count,*f_pos);
-    /**
-     * TODO: handle read
-     */
-    return retval;
+
+    struct aesd_dev *aesd_dev_ptr = (struct aesd_dev *)filp->private_data;
+    struct aesd_buffer_entry *read_pointer = NULL;
+    size_t char_returned;
+    size_t bytes_read = 0;
+    size_t bytes_to_copy;
+    unsigned long bytes_not_copied;
+
+    if (!access_ok(buf, count))
+    {
+        PDEBUG("Error: Memory access (%p) to the user space is not accessible!\n\r", buf);
+        return -1;
+    }
+
+    // Read the contents from the circular buffer
+    while(bytes_read < count)
+    {
+        read_pointer = aesd_circular_buffer_find_entry_offset_for_fpos(aesd_dev_ptr->buffer, (size_t)(f_pos + bytes_read), &char_returned);
+        
+        // If there are no more entries
+        if (read_pointer == NULL)
+        {
+            break;
+        }
+
+        // We can read the amount requested in this loop
+        if (read_pointer->size <= count - bytes_read)
+        {
+            bytes_to_copy = count - bytes_read;
+        }
+        // Read as many bytes that are in the entry
+        else
+        {
+            bytes_to_copy = read_pointer->size;
+        }
+
+        // Copy memory from user space to kernal space
+        bytes_not_copied = copy_to_user(buf + bytes_read, read_pointer->buffptr, bytes_to_copy);
+        if (bytes_not_copied > 0)
+        {
+            PDEBUG("Error: failed to copy bytes (%ld/%ld) to the user space!\n\r", bytes_not_copied, count);
+            return -ENOMEM;
+        }
+
+        // Update bytes read count
+        bytes_read += bytes_to_copy;
+    }
+
+    // Update the offset
+    *f_pos += bytes_read;
+    
+    // Return bytes read
+    return bytes_read;
 }
 
 ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count, loff_t *f_pos)
 {
     PDEBUG("write %zu bytes with offset %lld",count,*f_pos);
+    struct aesd_dev *aesd_dev_ptr = (struct aesd_dev *)filp->private_data;
 
     // TODO: implement lock
 
@@ -78,63 +129,63 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count, loff
     }
 
     // Allocate memory for entry_temp
-    if (aesd_device.entry_temp == NULL)
+    if (aesd_dev_ptr->entry_temp == NULL)
     {
-        aesd_device.entry_temp = ALLOC(sizeof(struct aesd_buffer_entry), GFP_KERNEL);
+        aesd_dev_ptr->entry_temp = ALLOC(sizeof(struct aesd_buffer_entry), GFP_KERNEL);
 
         // Failed to allocate memory
-        if (aesd_device.entry_temp == NULL)
+        if (aesd_dev_ptr->entry_temp == NULL)
         {
             PDEBUG("Error: Memory allocation failed for kernal memory entry!\n\r");
             return -ENOMEM;
         }
 
-        aesd_device.entry_temp->buffptr = NULL;
-        aesd_device.entry_temp->size = 0;
+        aesd_dev_ptr->entry_temp->buffptr = NULL;
+        aesd_dev_ptr->entry_temp->size = 0;
     }
 
     // Allocate memory for char buffer
-    if (aesd_device.entry_temp->buffptr == NULL)
+    if (aesd_dev_ptr->entry_temp->buffptr == NULL)
     {
         r_buffer_new = ALLOC(count, GFP_KERNEL);
     }
     else
     {
-        r_buffer_new = ALLOC(aesd_device.entry_temp->size + count, GFP_KERNEL);
+        r_buffer_new = ALLOC(aesd_dev_ptr->entry_temp->size + count, GFP_KERNEL);
     }
 
     // Failed to allocate memory
     if (!r_buffer_new)
     {
         PDEBUG("Error: Memory allocation failed for kernal memory buffer!\n\r");
-        FREE(aesd_device.entry_temp->buffptr);
-        FREE(aesd_device.entry_temp);
+        FREE(aesd_dev_ptr->entry_temp->buffptr);
+        FREE(aesd_dev_ptr->entry_temp);
         return -ENOMEM;
     }
     
     // Free old buffer and set new char buffer pointer
-    FREE(aesd_device.entry_temp->buffptr);
-    aesd_device.entry_temp->buffptr = r_buffer_new;
+    FREE(aesd_dev_ptr->entry_temp->buffptr);
+    aesd_dev_ptr->entry_temp->buffptr = r_buffer_new;
 
     // Copy memory from user space to kernal space
-    unsigned long bytes_not_copied = copy_from_user((void*)(aesd_device.entry_temp->buffptr + aesd_device.entry_temp->size), buf, count);
+    unsigned long bytes_not_copied = copy_from_user((void*)(aesd_dev_ptr->entry_temp->buffptr + aesd_dev_ptr->entry_temp->size), buf, count);
     if (bytes_not_copied > 0)
     {
         PDEBUG("Error: failed to copy bytes (%ld/%ld) from the user space!\n\r", bytes_not_copied, count);
-        FREE(aesd_device.entry_temp->buffptr);
-        FREE(aesd_device.entry_temp);
+        FREE(aesd_dev_ptr->entry_temp->buffptr);
+        FREE(aesd_dev_ptr->entry_temp);
         return -ENOMEM;
     }
 
     // Set entry size post copy
-    aesd_device.entry_temp->size += count;
+    aesd_dev_ptr->entry_temp->size += count;
 
     // Check if the entry is complete
-    if (aesd_device.entry_temp->buffptr[aesd_device.entry_temp->size] == END_WRITE_CHAR)
+    if (aesd_dev_ptr->entry_temp->buffptr[aesd_dev_ptr->entry_temp->size] == END_WRITE_CHAR)
     {
         // Add entry
-        overwritten_entry = aesd_circular_buffer_add_entry(aesd_device.buffer, aesd_device.entry_temp);
-        aesd_device.entry_temp = NULL;
+        overwritten_entry = aesd_circular_buffer_add_entry(aesd_dev_ptr->buffer, aesd_dev_ptr->entry_temp);
+        aesd_dev_ptr->entry_temp = NULL;
 
         // The write overwrote a entry so we need to free it
         if (overwritten_entry != NULL)
@@ -143,7 +194,7 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count, loff
         }
     }
     
-    return 0;
+    return count;
 }
 struct file_operations aesd_fops = {
     .owner =    THIS_MODULE,
