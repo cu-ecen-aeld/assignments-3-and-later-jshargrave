@@ -28,10 +28,9 @@ struct aesd_dev
      struct mutex buffer_lock;                     // Buffer lock
 };
 
+// Global variables
 int aesd_major =   0; // use dynamic major
 int aesd_minor =   0;
-
-MODULE_AUTHOR("Joseph Hargrave");
 struct aesd_dev aesd_device;
 
 int aesd_open(struct inode *inode, struct file *filp);
@@ -42,6 +41,14 @@ static int aesd_setup_cdev(struct aesd_dev *dev);
 int aesd_init_module(void);
 void aesd_cleanup_module(void);
 int get_lock(struct mutex* m);
-int release_lock(struct mutex* m);
+void release_lock(struct mutex* m);
+
+struct file_operations aesd_fops = {
+    .owner =    THIS_MODULE,
+    .read =     aesd_read,
+    .write =    aesd_write,
+    .open =     aesd_open,
+    .release =  aesd_release,
+};
 
 #endif /* AESD_CHAR_DRIVER_AESDCHAR_H_ */

@@ -13,23 +13,24 @@
 
 #include "aesdchar.h"
 
+MODULE_LICENSE("GPL");
+MODULE_AUTHOR("Joseph Hargrave");
+MODULE_DESCRIPTION("AESD character driver");
+
 int aesd_open(struct inode *inode, struct file *filp)
 {
     PDEBUG("open");
-    /**
-     * TODO: handle open
-     */
 
-    inode->i_cdev;
+    // Assign dev pointer into private data for other methods
+    struct aesd_dev *aesd_dev_ptr = container_of(inode->i_cdev, struct aesd_dev, cdev);
+    filp->private_data = aesd_dev_ptr;
+
     return 0;
 }
 
 int aesd_release(struct inode *inode, struct file *filp)
 {
     PDEBUG("release");
-    /**
-     * TODO: handle release
-     */
     return 0;
 }
 
@@ -50,7 +51,7 @@ ssize_t aesd_read(struct file *filp, char __user *buf, size_t count, loff_t *f_p
     if (get_lock_rv != 0)
     {
         PDEBUG("Error: failed to get lock!\n\r");
-        return -1;
+        return -ERESTARTSYS;
     }
 
     // Read the contents from the circular buffer
@@ -108,16 +109,15 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count, loff
     struct aesd_dev *aesd_dev_ptr = filp->private_data;
     char* new_buffer = NULL;
     char* overwritten_entry = NULL;
+    unsigned long bytes_not_copied = 0;
 
     // Get lock
     int get_lock_rv = get_lock(&aesd_dev_ptr->buffer_lock);
     if (get_lock_rv != 0)
     {
         PDEBUG("Error: failed to get lock!\n\r");
-        return -1;
+        return -ERESTARTSYS;
     }
-
-
 
     // Allocate memory for char buffer
     if (aesd_dev_ptr->entry_temp.buffptr == NULL)
@@ -144,7 +144,7 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count, loff
     }
 
     // Copy memory from user space to kernal space
-    unsigned long bytes_not_copied = copy_from_user((void*)(new_buffer + aesd_dev_ptr->entry_temp.size), buf, count);
+    bytes_not_copied = copy_from_user((void*)(new_buffer + aesd_dev_ptr->entry_temp.size), buf, count);
     if (bytes_not_copied > 0)
     {
         PDEBUG("Error: failed to copy bytes (%lu/%zu) from the user space!\n\r", bytes_not_copied, count);
@@ -186,14 +186,6 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count, loff
     return count;
 }
 
-struct file_operations aesd_fops = {
-    .owner =    THIS_MODULE,
-    .read =     aesd_read,
-    .write =    aesd_write,
-    .open =     aesd_open,
-    .release =  aesd_release,
-};
-
 static int aesd_setup_cdev(struct aesd_dev *dev)
 {
     int err, devno = MKDEV(aesd_major, aesd_minor);
@@ -207,8 +199,6 @@ static int aesd_setup_cdev(struct aesd_dev *dev)
     }
     return err;
 }
-
-
 
 int aesd_init_module(void)
 {
@@ -255,6 +245,9 @@ void aesd_cleanup_module(void)
 
     // Reset Circular Buffer
     aesd_circular_buffer_init(&aesd_device.buffer);
+
+    // Reset working entry
+    FREE(aesd_device.entry_temp.buffptr);
     aesd_device.entry_temp.buffptr = NULL;
     aesd_device.entry_temp.size = 0;
 
@@ -273,11 +266,10 @@ int get_lock(struct mutex* m)
     return 0;
 }
 
-int release_lock(struct mutex* m)
+void release_lock(struct mutex* m)
 {
     // Release lock
     mutex_unlock(m);
-    return 0;
 }
 
 
