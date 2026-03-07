@@ -373,7 +373,9 @@ int startup()
     SLIST_INIT(&linked_list);
 
     // Mutex
+#ifndef USE_AESD_CHAR_DEVICE
     pthread_mutex_init(&file_mutex, NULL);
+#endif
 
     // Setup logger
     openlog(NULL, LOG_ODELAY, LOG_USER);
@@ -647,6 +649,7 @@ int sending_data(struct ThreadData *t_data, struct BufferData *rb_data, struct B
 
 int get_file_mutex()
 {
+#ifndef USE_AESD_CHAR_DEVICE
     // Get mutex
     int rc = pthread_mutex_lock(&file_mutex);
     if (rc != 0)
@@ -654,11 +657,13 @@ int get_file_mutex()
         print_and_log(LOG_ERR, "Error: Failed to get file mutex!\n");
         return -1;
     }
+#endif
     return 0;
 }
 
 int release_file_mutex()
 {
+#ifndef USE_AESD_CHAR_DEVICE
     // Release mutex
     int rc = pthread_mutex_unlock(&file_mutex);
     if (rc != 0)
@@ -666,6 +671,7 @@ int release_file_mutex()
         print_and_log(LOG_ERR, "Error: Failed to release file mutex!\n");
         return -1;
     }
+#endif
     return 0;
 }
 

@@ -16,9 +16,9 @@
 
 #include "aesd-circular-buffer.h"
 
-void print_buffer(struct aesd_circular_buffer *buffer)
+void aesd_buffer_print(struct aesd_circular_buffer *buffer)
 {
-    printf("Printing Buffer\n");
+    PDEBUG("Printing Buffer\n\r");
     size_t index = 0;
     struct aesd_buffer_entry* temp_ptr = NULL;
     
@@ -26,14 +26,13 @@ void print_buffer(struct aesd_circular_buffer *buffer)
     {
         if (temp_ptr->buffptr != NULL)
         {
-            printf("index %ld: %s", index, temp_ptr->buffptr);
+            PDEBUG("index %ld: %s", index, temp_ptr->buffptr);
         }
         else
         {
-            printf("index %ld: (none)\n", index);
+            PDEBUG("index %ld: (none)\n\r", index);
         }
     }
-    printf("Done\n");
 }
 
 /**
@@ -88,11 +87,14 @@ struct aesd_buffer_entry *aesd_circular_buffer_find_entry_offset_for_fpos(struct
 * Any necessary locking must be handled by the caller
 * Any memory referenced in @param add_entry must be allocated by and/or must have a lifetime managed by the caller.
 */
-void aesd_circular_buffer_add_entry(struct aesd_circular_buffer *buffer, const struct aesd_buffer_entry *add_entry)
+struct aesd_buffer_entry* aesd_circular_buffer_add_entry(struct aesd_circular_buffer *buffer, const struct aesd_buffer_entry *add_entry)
 {
+    struct aesd_buffer_entry *overwritten_entry =  &buffer->entry[buffer->out_offs];
+
     // Write to buffer
     buffer->entry[buffer->in_offs].buffptr = add_entry->buffptr;
     buffer->entry[buffer->in_offs].size = add_entry->size;
+    buffer->empty = false;
 
     // Check if its time for wrap around
     if (buffer->in_offs == AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED - 1)
@@ -116,6 +118,7 @@ void aesd_circular_buffer_add_entry(struct aesd_circular_buffer *buffer, const s
         {
             buffer->out_offs++;
         }
+        return overwritten_entry;
     }
 
     // If write offset matches read offset then the buffer is full
@@ -123,6 +126,40 @@ void aesd_circular_buffer_add_entry(struct aesd_circular_buffer *buffer, const s
     {
         buffer->full = true;
     }
+
+    return NULL;
+}
+
+struct aesd_buffer_entry* aesd_circular_buffer_remove_entry(struct aesd_circular_buffer *buffer)
+{
+    struct aesd_buffer_entry* return_ptr = NULL;
+
+    // Return null if buffer is empty
+    if (buffer->empty == false)
+    {
+        return NULL;
+    }
+
+    // Entry to return
+    return_ptr = &buffer->entry[buffer->out_offs];
+
+    // Check if its time for wrap around
+    if (buffer->out_offs == AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED - 1)
+    {
+        buffer->out_offs = 0;
+    }
+    else
+    {
+        buffer->out_offs++;
+    }
+
+    // If read offset matches write offset then the buffer is empty
+    if (buffer->in_offs == buffer->out_offs)
+    {
+        buffer->empty = true;
+    }
+
+    return return_ptr;
 }
 
 /**
