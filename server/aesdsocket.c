@@ -59,7 +59,9 @@ int main_loop()
         if (tp.tv_sec >= next_timestamp)
         {
             next_timestamp = tp.tv_sec + 10;
+#ifndef DISABLE_TIMESTAMP
             write_time_stamp();
+#endif
         }
 
         if (current_state == Waiting)
@@ -373,7 +375,9 @@ int startup()
     SLIST_INIT(&linked_list);
 
     // Mutex
+#ifndef DISABLE_LOCKING
     pthread_mutex_init(&file_mutex, NULL);
+#endif
 
     // Setup logger
     openlog(NULL, LOG_ODELAY, LOG_USER);
@@ -647,6 +651,7 @@ int sending_data(struct ThreadData *t_data, struct BufferData *rb_data, struct B
 
 int get_file_mutex()
 {
+#ifndef DISABLE_LOCKING
     // Get mutex
     int rc = pthread_mutex_lock(&file_mutex);
     if (rc != 0)
@@ -654,11 +659,13 @@ int get_file_mutex()
         print_and_log(LOG_ERR, "Error: Failed to get file mutex!\n");
         return -1;
     }
+#endif
     return 0;
 }
 
 int release_file_mutex()
 {
+#ifndef DISABLE_LOCKING
     // Release mutex
     int rc = pthread_mutex_unlock(&file_mutex);
     if (rc != 0)
@@ -666,6 +673,7 @@ int release_file_mutex()
         print_and_log(LOG_ERR, "Error: Failed to release file mutex!\n");
         return -1;
     }
+#endif
     return 0;
 }
 
@@ -727,12 +735,14 @@ int shutting_down()
         socket_fd = -1;
     }
 
+#ifndef USE_AESD_CHAR_DEVICE
     // Delete tmp file
     int unlink_return_value = unlink(FILE_PATH);
     if (unlink_return_value == -1)
     {
         print_and_log(LOG_ERR, "Error: Failed to delete temp file '%s'!\n", FILE_PATH);
     }
+#endif
 
     closelog();
 

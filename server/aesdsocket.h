@@ -27,11 +27,18 @@
 #include <time.h>
 #include "queue.h"
 
+#ifdef USE_AESD_CHAR_DEVICE
+#define FILE_PATH "/dev/aesdchar"
+#define DISABLE_LOCKING
+#define DISABLE_TIMESTAMP
+#else
+#define FILE_PATH "/var/tmp/aesdsocketdata"
+#endif
+
 #define SOCKET_PORT "9000"
 #define RECV_BUFFER_GROW_SIZE 1024
 #define RECV_BUFFER_TEMP_SIZE 1024
 #define SEND_BUFFER_SIZE 1024
-#define FILE_PATH "/var/tmp/aesdsocketdata"
 #define PACKET_ENDING '\n'
 #define TIME_FORMAT "timestamp:%Y-%m-%dT%T\n"
 #define TIME_BUFFER_SIZE 256
@@ -74,7 +81,9 @@ SLIST_HEAD(LinkedListHead, LinkedListItem);
 struct LinkedListHead linked_list;
 
 // MUTEX
+#ifndef USE_AESD_CHAR_DEVICE
 pthread_mutex_t file_mutex;
+#endif
 
 // Buffer structure
 struct BufferData
